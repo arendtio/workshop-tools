@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Workshop Sandbox — UI mock-up</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;1,9..40,400&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <h1>AI Workshop Sandbox</h1>
+        <p>Compose inputs, processing, and outputs — concept only.</p>
+      </div>
+      <div class="badges">
+        <span class="badge mock">Mock-up</span>
+        <span class="badge">No backend</span>
+      </div>
+    </header>
+
+    <main class="sandbox">
+      <section class="intro">
+        <h2>How to use this prototype</h2>
+        <p>
+          Add blocks in each lane to mirror a workshop flow. Multiple inputs and stacked processing
+          steps are intentional: the UI should support experimentation with combinations before
+          anything is wired to real AI services.
+        </p>
+      </section>
+
+      <div class="pipeline" aria-label="Input, processing, and output lanes">
+        <section class="lane" aria-labelledby="lane-inputs-title">
+          <header>
+            <h3 id="lane-inputs-title">Inputs</h3>
+            <span class="hint">Mix text, media, and live streams</span>
+          </header>
+          <div class="cards" id="inputs-cards"></div>
+          <p class="multi-hint" id="multi-input-hint">Multi-modal input — order and weighting can be defined later.</p>
+          <div class="lane-actions">
+            <button type="button" class="primary" id="btn-add-input">+ Add input</button>
+          </div>
+        </section>
+
+        <div class="connector" aria-hidden="true">→</div>
+
+        <section class="lane" aria-labelledby="lane-process-title">
+          <header>
+            <h3 id="lane-process-title">Processing</h3>
+            <span class="hint">Prompts, memory, tools, loops</span>
+          </header>
+          <div class="cards" id="process-cards"></div>
+          <div class="lane-actions">
+            <button type="button" class="primary" id="btn-add-process">+ Add block</button>
+          </div>
+        </section>
+
+        <div class="connector" aria-hidden="true">→</div>
+
+        <section class="lane" aria-labelledby="lane-outputs-title">
+          <header>
+            <h3 id="lane-outputs-title">Outputs</h3>
+            <span class="hint">What participants see or hear</span>
+          </header>
+          <div class="cards" id="outputs-cards"></div>
+          <div class="lane-actions">
+            <button type="button" class="primary" id="btn-add-output">+ Add output</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="presets" aria-labelledby="presets-title">
+        <h3 id="presets-title">Quick layouts</h3>
+        <div class="preset-row">
+          <button type="button" class="ghost" data-preset="text-prompt">Classic text → text</button>
+          <button type="button" class="ghost" data-preset="vision">Vision + knowledge</button>
+          <button type="button" class="ghost" data-preset="live-audio">Live audio + tools</button>
+          <button type="button" class="ghost" data-preset="multimodal-out">Rich pipeline</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="status-bar">
+      <span>Run does not call any models yet — it only confirms the layout for discussion.</span>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-clear">Clear all</button>
+        <button type="button" class="run" id="btn-run-mock">Run (preview)</button>
+      </div>
+    </footer>
+
+    <div class="modal-backdrop" id="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal">
+        <header>
+          <div>
+            <h4 id="modal-title">Add</h4>
+            <p class="subtitle" id="modal-subtitle"></p>
+          </div>
+          <button type="button" class="close" id="modal-close" aria-label="Close">×</button>
+        </header>
+        <div class="option-grid" id="option-grid"></div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
