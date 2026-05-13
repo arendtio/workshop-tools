@@ -435,6 +435,134 @@ button.chip:hover {
   color: var(--text-muted);
 }
 
+.module-api-mapping {
+  margin: 0 0 0.45rem;
+  font-size: 0.65rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.module-api-mapping-k {
+  display: inline-block;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.58rem;
+  color: var(--accent);
+  margin-right: 0.35rem;
+}
+
+.field-hint {
+  margin: 0;
+  font-size: 0.65rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.dropzone {
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 0.55rem 0.5rem;
+  background: #f8f9fb;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+}
+
+.dropzone:hover:not(.is-disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone.is-dragover {
+  border-color: var(--accent);
+  background: rgba(26, 79, 138, 0.12);
+}
+
+.dropzone.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.dropzone-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dropzone-sub {
+  margin-top: 0.25rem;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.dropzone-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.camera-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.camera-preview-video {
+  width: 100%;
+  max-height: 140px;
+  border-radius: 4px;
+  background: #0d1117;
+  object-fit: cover;
+}
+
+.camera-preview-snap {
+  width: 100%;
+  max-height: 120px;
+  border-radius: 4px;
+  object-fit: contain;
+  background: #f0f2f5;
+  border: 1px solid var(--border-subtle);
+}
+
+.camera-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.camera-preview-btn {
+  font-family: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.28rem 0.55rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.camera-preview-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.camera-preview-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.camera-preview-secondary {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
 .module-card-fields {
   display: flex;
   flex-direction: column;

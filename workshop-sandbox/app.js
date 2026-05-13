@@ -1,5 +1,8 @@
 /**
  * Workshop AI Sandbox — workbench UI mock-up (no backend).
+ * Form fields are aligned with current OpenAI platform APIs (see each card’s
+ * “API note”) as documented at https://developers.openai.com/api/reference/
+ * and related guides (May 2026).
  */
 
 const INPUT_TYPES = [
@@ -30,227 +33,847 @@ const OUTPUT_TYPES = [
 
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
 
+/** @type {Map<string, MediaStream>} block id → active preview stream */
+const blockMediaStreams = new Map();
+
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
- * @type {Record<string, { defaults: Record<string, string>, fields: { key: string, label: string, type: 'text'|'textarea'|'number'|'select', placeholder?: string, rows?: number, options?: { value: string, label: string }[] }[] }>}
+ * Field objects: type is one of text, textarea, number, select, dropzone, hint, camera_preview, file.
+ * @type {Record<string, { apiMapping?: string, defaults: Record<string, string>, fields: object[] }>}
  */
 const FORM_SCHEMA = {
   "input:text": {
+    apiMapping:
+      "Chat Completions / Responses — user text turns (`messages` / `input`). See Text generation guide.",
     defaults: {
       content: "Summarize the workshop goals in two bullet points.",
+      labelForModel: "Workshop participant",
     },
     fields: [
       {
         key: "content",
-        label: "Text",
+        label: "Text for the model",
         type: "textarea",
-        rows: 3,
-        placeholder: "Your prompt or data",
+        rows: 4,
+        placeholder: "Prompt or raw text content",
+      },
+      {
+        key: "labelForModel",
+        label: "Participant label (optional)",
+        type: "text",
+        placeholder: "Maps to optional `name` on chat messages — for logs only",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Backend sends this string as a user message (or `input_text` in the Responses API).",
       },
     ],
   },
   "input:image": {
-    defaults: { sourceUrl: "https://example.com/mock/frame.jpg", altText: "Whiteboard sketch" },
-    fields: [
-      { key: "sourceUrl", label: "Image URL / path", type: "text", placeholder: "https://… or file reference" },
-      { key: "altText", label: "Description / alt text", type: "text", placeholder: "For accessibility and retrieval" },
-    ],
-  },
-  "input:audio-rec": {
-    defaults: { fileName: "take-03.wav", durationSec: "12.4" },
-    fields: [
-      { key: "fileName", label: "Clip name", type: "text", placeholder: "Recorded or uploaded file" },
-      { key: "durationSec", label: "Duration (seconds)", type: "number", placeholder: "e.g. 12.4" },
-    ],
-  },
-  "input:audio-live": {
-    defaults: { device: "default-mic", chunkMs: "320" },
-    fields: [
-      {
-        key: "device",
-        label: "Input device",
-        type: "select",
-        options: [
-          { value: "default-mic", label: "Default microphone" },
-          { value: "usb-01", label: "USB mic (mock)" },
-          { value: "loopback", label: "System loopback (mock)" },
-        ],
-      },
-      { key: "chunkMs", label: "Frame size (ms)", type: "number", placeholder: "e.g. 320" },
-    ],
-  },
-  "input:video-live": {
-    defaults: { source: "webcam-0", resolution: "640x480" },
-    fields: [
-      {
-        key: "source",
-        label: "Video source",
-        type: "select",
-        options: [
-          { value: "webcam-0", label: "Webcam 0" },
-          { value: "screen-1", label: "Screen share (mock)" },
-        ],
-      },
-      { key: "resolution", label: "Target resolution", type: "text", placeholder: "640×480" },
-    ],
-  },
-  "input:video-rec": {
-    defaults: { fileName: "clip-h264.mp4", startOffsetSec: "0" },
-    fields: [
-      { key: "fileName", label: "File name", type: "text", placeholder: "Container on disk / URL" },
-      { key: "startOffsetSec", label: "Start offset (sec)", type: "number", placeholder: "0" },
-    ],
-  },
-  "process:instruction": {
+    apiMapping:
+      "Chat Completions user content `image_url` (`url` + `detail`) or Responses `input_image` (`image_url` / `file_id`). Vision guide.",
     defaults: {
-      system:
-        "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options.",
-      user: "Explain how this pipeline would run end-to-end in one short paragraph.",
-      temperature: "0.4",
+      imageUrl: "",
+      visionDetail: "auto",
+      altText: "Whiteboard sketch",
+      uploadStub: "",
     },
     fields: [
       {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Either paste a public HTTPS URL, upload a file (your server should host or base64-wrap), or grab a live frame below.",
+      },
+      {
+        key: "imageUrl",
+        label: "Image URL",
+        type: "text",
+        placeholder: "https://… (or leave empty if you upload / capture)",
+      },
+      {
+        key: "uploadStub",
+        label: "Upload image",
+        type: "dropzone",
+        accept: "image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif",
+        dropLabel: "Drop image here or click to browse",
+      },
+      {
+        key: "visionDetail",
+        label: "Vision detail",
+        type: "select",
+        options: [
+          { value: "auto", label: "auto — let the API decide" },
+          { value: "low", label: "low — faster / cheaper" },
+          { value: "high", label: "high — finer detail" },
+        ],
+      },
+      { key: "altText", label: "Human description / caption", type: "text", placeholder: "Accessibility + better retrieval" },
+      {
+        key: "_live",
+        label: "Live camera (browser)",
+        type: "camera_preview",
+        mode: "photo",
+        facing: "environment",
+      },
+    ],
+  },
+  "input:audio-rec": {
+    apiMapping:
+      "POST `/v1/audio/transcriptions` — multipart `file` + `model` (e.g. `gpt-4o-transcribe`, `whisper-1`). Speech-to-text guide.",
+    defaults: {
+      uploadStub: "",
+      transcriptionModel: "gpt-4o-transcribe",
+      language: "",
+      responseShape: "text",
+    },
+    fields: [
+      {
+        key: "uploadStub",
+        label: "Audio file",
+        type: "dropzone",
+        accept: "audio/*,.mp3,.wav,.m4a,.webm,.mp4,.mpeg,.mpga",
+        dropLabel: "Drop audio or browse (mp3, wav, m4a, webm…)",
+      },
+      {
+        key: "transcriptionModel",
+        label: "Transcription model",
+        type: "select",
+        options: [
+          { value: "gpt-4o-transcribe", label: "gpt-4o-transcribe" },
+          { value: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe" },
+          { value: "gpt-4o-transcribe-diarize", label: "gpt-4o-transcribe-diarize (speakers)" },
+          { value: "whisper-1", label: "whisper-1 (classic)" },
+        ],
+      },
+      {
+        key: "language",
+        label: "Language hint (optional)",
+        type: "text",
+        placeholder: "ISO code e.g. en, de — improves accuracy",
+      },
+      {
+        key: "responseShape",
+        label: "What participants see first",
+        type: "select",
+        options: [
+          { value: "text", label: "Plain transcript text" },
+          { value: "verbose_json", label: "Verbose JSON (timestamps, etc.)" },
+          { value: "diarized_json", label: "Diarized JSON (speakers)" },
+        ],
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop: record in-browser or upload; backend forwards bytes as multipart `file`. Streaming supported with `stream=true` on supported models.",
+      },
+    ],
+  },
+  "input:audio-live": {
+    apiMapping:
+      "Realtime API — `/v1/realtime` voice-agent session (WebRTC/WebSocket). Models like `gpt-realtime-2`. Realtime + Voice agents guides.",
+    defaults: {
+      sessionGoal: "voice_agent",
+      connection: "webrtc",
+      model: "gpt-realtime-2",
+      device: "default-mic",
+      vadPreset: "server_vad",
+    },
+    fields: [
+      {
+        key: "sessionGoal",
+        label: "Session type",
+        type: "select",
+        options: [
+          { value: "voice_agent", label: "Voice agent — model replies with speech" },
+          { value: "transcription", label: "Live transcription — text deltas only" },
+          { value: "translation", label: "Live translation — dedicated translation session" },
+        ],
+      },
+      {
+        key: "connection",
+        label: "Transport",
+        type: "select",
+        options: [
+          { value: "webrtc", label: "WebRTC (browser / Agents SDK pattern)" },
+          { value: "websocket", label: "WebSocket (server-side audio)" },
+        ],
+      },
+      {
+        key: "model",
+        label: "Realtime model",
+        type: "select",
+        options: [
+          { value: "gpt-realtime-2", label: "gpt-realtime-2" },
+          { value: "gpt-realtime-mini", label: "gpt-realtime-mini (example)" },
+          { value: "gpt-realtime-whisper", label: "gpt-realtime-whisper (transcription)" },
+        ],
+      },
+      {
+        key: "device",
+        label: "Microphone",
+        type: "select",
+        options: [
+          { value: "default-mic", label: "System default" },
+          { value: "usb-01", label: "USB headset (example)" },
+        ],
+      },
+      {
+        key: "vadPreset",
+        label: "Turn-taking",
+        type: "select",
+        options: [
+          { value: "server_vad", label: "Server-side voice activity" },
+          { value: "push_to_talk", label: "Push-to-talk (UI responsibility)" },
+        ],
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Browser workshops: capture audio client-side, stream to your backend, forward to OpenAI with an ephemeral client secret — never expose org API keys.",
+      },
+    ],
+  },
+  "input:video-live": {
+    apiMapping:
+      "Sample frames → Chat `image_url` parts or future video inputs; live path mirrors Realtime/WebRTC capture patterns.",
+    defaults: { source: "webcam", facing: "user", resolution: "1280x720" },
+    fields: [
+      {
+        key: "source",
+        label: "Capture",
+        type: "select",
+        options: [
+          { value: "webcam", label: "Webcam" },
+          { value: "screen", label: "Screen share" },
+        ],
+      },
+      { key: "facing", label: "Camera facing", type: "select", options: [
+        { value: "user", label: "Front / selfie" },
+        { value: "environment", label: "Back / room" },
+      ] },
+      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1280x720" },
+      {
+        key: "_live",
+        label: "Preview",
+        type: "camera_preview",
+        mode: "video",
+        facing: "user",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop: show preview here; backend samples frames to still-image model calls until native video input is wired.",
+      },
+    ],
+  },
+  "input:video-rec": {
+    apiMapping:
+      "No single “video understanding” upload in core API — extract key frames client-side or server-side, then use `image_url` / `input_image`.",
+    defaults: { uploadStub: "", startOffsetSec: "0", frameHint: "1 fps keyframes" },
+    fields: [
+      {
+        key: "uploadStub",
+        label: "Video file",
+        type: "dropzone",
+        accept: "video/*,.mp4,.webm,.mov,.mkv",
+        dropLabel: "Drop video or browse",
+      },
+      { key: "startOffsetSec", label: "Start offset (sec)", type: "number", placeholder: "0" },
+      {
+        key: "frameHint",
+        label: "Frame sampling for vision",
+        type: "text",
+        placeholder: "e.g. 1 fps — backend concern",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Tell participants the model sees images derived from video, not the raw timeline, unless you build that pipeline.",
+      },
+    ],
+  },
+  "process:instruction": {
+    apiMapping:
+      "POST `/v1/chat/completions` or `/v1/responses` — `messages`, `model`, `temperature` / `reasoning_effort`, `max_completion_tokens`, `modalities`, `tools`.",
+    defaults: {
+      instructionRole: "system",
+      system:
+        "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options.",
+      user: "Explain how this pipeline would run end-to-end in one short paragraph.",
+      model: "gpt-4o",
+      temperature: "0.4",
+      maxCompletionTokens: "1024",
+      outputModalities: "text",
+      outputVoice: "alloy",
+      stream: "false",
+    },
+    fields: [
+      {
+        key: "instructionRole",
+        label: "Instruction role",
+        type: "select",
+        options: [
+          { value: "system", label: "system — classic GPT instructions" },
+          { value: "developer", label: "developer — preferred on newer reasoning models" },
+        ],
+      },
+      {
         key: "system",
-        label: "System",
+        label: "System / developer text",
         type: "textarea",
-        rows: 2,
+        rows: 3,
         placeholder: "Behavior, tone, constraints",
       },
       {
         key: "user",
-        label: "Instructions",
+        label: "User instructions",
         type: "textarea",
-        rows: 2,
-        placeholder: "What to do with the inputs",
+        rows: 3,
+        placeholder: "What to do with upstream inputs",
       },
-      { key: "temperature", label: "Temperature", type: "number", placeholder: "0–2" },
+      {
+        key: "model",
+        label: "Model",
+        type: "select",
+        options: [
+          { value: "gpt-4o", label: "gpt-4o (multimodal text+image+audio in)" },
+          { value: "gpt-4o-mini", label: "gpt-4o-mini" },
+          { value: "gpt-4.1", label: "gpt-4.1" },
+          { value: "gpt-5-mini", label: "gpt-5-mini (example)" },
+          { value: "gpt-4o-audio-preview", label: "gpt-4o-audio-preview (audio out)" },
+        ],
+      },
+      { key: "temperature", label: "Temperature (0–2)", type: "number", placeholder: "0.4" },
+      {
+        key: "maxCompletionTokens",
+        label: "Max completion tokens",
+        type: "number",
+        placeholder: "Prefer `max_completion_tokens` over legacy `max_tokens`",
+      },
+      {
+        key: "outputModalities",
+        label: "Output modalities",
+        type: "select",
+        options: [
+          { value: "text", label: "text only" },
+          { value: "text,audio", label: "text + audio (audio-capable models)" },
+        ],
+      },
+      {
+        key: "outputVoice",
+        label: "Spoken voice (if audio out)",
+        type: "select",
+        options: [
+          { value: "alloy", label: "alloy" },
+          { value: "ash", label: "ash" },
+          { value: "ballad", label: "ballad" },
+          { value: "coral", label: "coral" },
+          { value: "echo", label: "echo" },
+          { value: "sage", label: "sage" },
+          { value: "shimmer", label: "shimmer" },
+          { value: "marin", label: "marin" },
+          { value: "cedar", label: "cedar" },
+        ],
+      },
+      {
+        key: "stream",
+        label: "Stream tokens",
+        type: "select",
+        options: [
+          { value: "false", label: "No" },
+          { value: "true", label: "Yes (`stream: true`)" },
+        ],
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Reasoning models use `reasoning_effort` instead of temperature — expose a separate control in production if you target o-series / GPT-5 reasoning.",
+      },
     ],
   },
   "process:vector-db": {
-    defaults: { collection: "workshop-docs-v3", topK: "4", filterJson: '{"team":"sandbox"}' },
+    apiMapping:
+      "Vector stores (`POST /v1/vector_stores`) + Files API + Responses/Assistants `file_search` tool (`vector_store_ids`, `max_num_results`, filters).",
+    defaults: {
+      vectorStoreId: "vs_workshop_docs",
+      maxNumResults: "8",
+      scoreThreshold: "0",
+      ranker: "auto",
+      chunking: "auto",
+      embeddingModel: "text-embedding-3-small",
+      filterJson: '{"team":"sandbox"}',
+      ingestFilesStub: "",
+    },
     fields: [
-      { key: "collection", label: "Collection / index", type: "text", placeholder: "Vector collection id" },
-      { key: "topK", label: "Top K", type: "number", placeholder: "e.g. 4" },
-      { key: "filterJson", label: "Metadata filter (JSON)", type: "textarea", rows: 2, placeholder: '{"key":"value"}' },
+      {
+        key: "vectorStoreId",
+        label: "Vector store ID",
+        type: "text",
+        placeholder: "vs_… from OpenAI dashboard or API",
+      },
+      {
+        key: "maxNumResults",
+        label: "Max chunks to retrieve",
+        type: "number",
+        placeholder: "1–50 for file_search",
+      },
+      {
+        key: "scoreThreshold",
+        label: "Score threshold (0–1, optional)",
+        type: "text",
+        placeholder: "0 = off / API default",
+      },
+      {
+        key: "ranker",
+        label: "Hybrid ranker",
+        type: "select",
+        options: [
+          { value: "auto", label: "auto" },
+          { value: "default-2024-11-15", label: "default-2024-11-15" },
+        ],
+      },
+      {
+        key: "chunking",
+        label: "Chunking (ingest)",
+        type: "select",
+        options: [
+          { value: "auto", label: "auto chunking" },
+          { value: "static", label: "static (custom overlap)" },
+        ],
+      },
+      {
+        key: "embeddingModel",
+        label: "Embedding model (indexing)",
+        type: "select",
+        options: [
+          { value: "text-embedding-3-small", label: "text-embedding-3-small" },
+          { value: "text-embedding-3-large", label: "text-embedding-3-large" },
+          { value: "text-embedding-ada-002", label: "text-embedding-ada-002" },
+        ],
+      },
+      {
+        key: "filterJson",
+        label: "Metadata filter (JSON)",
+        type: "textarea",
+        rows: 2,
+        placeholder: '{"key":{"eq":"value"}}',
+      },
+      {
+        key: "ingestFilesStub",
+        label: "Documents to index (upload)",
+        type: "dropzone",
+        accept: ".pdf,.txt,.md,.doc,.docx,.html,.csv",
+        dropLabel: "Drop knowledge files (processed server-side)",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop story: uploads become `file_id`s attached to a vector store; the model consumes retrieved snippets via `file_search`, not raw uploads.",
+      },
     ],
   },
   "process:loop": {
+    apiMapping:
+      "Application-level control (max tool rounds / agent loop) — combine Chat `tool_choice` / Responses tools with your own orchestration.",
     defaults: { maxIterations: "4", stopWhen: "Answer includes a numbered list." },
     fields: [
-      { key: "maxIterations", label: "Max iterations", type: "number", placeholder: "e.g. 4" },
+      { key: "maxIterations", label: "Max iterations", type: "number", placeholder: "4" },
       {
         key: "stopWhen",
-        label: "Stop condition (natural language)",
+        label: "Stop condition (plain language)",
         type: "textarea",
         rows: 2,
         placeholder: "When should the loop exit?",
       },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "OpenAI does not auto-loop for arbitrary NL stop text — your backend evaluates this between calls.",
+      },
     ],
   },
   "process:tooling": {
-    defaults: { toolName: "http_json", endpoint: "https://api.example.com/v1/mock", timeoutMs: "800" },
+    apiMapping:
+      "Responses / Chat `tools`: `function`, `web_search`, `file_search`, custom tools — plus your own HTTP connectors executed server-side.",
+    defaults: {
+      toolKind: "function",
+      toolName: "lookup_customer",
+      toolDescription: "Fetch CRM row by id.",
+      webSearchContext: "medium",
+      allowedDomains: "",
+      endpoint: "https://api.example.com/v1/mock",
+      timeoutMs: "800",
+    },
     fields: [
       {
-        key: "toolName",
-        label: "Tool id",
+        key: "toolKind",
+        label: "Tooling pattern",
         type: "select",
         options: [
-          { value: "http_json", label: "HTTP JSON (mock)" },
-          { value: "python_cell", label: "Python cell (mock)" },
-          { value: "sql_readonly", label: "SQL read-only (mock)" },
+          { value: "function", label: "Function tool (JSON schema on server)" },
+          { value: "web_search", label: "Built-in web_search" },
+          { value: "file_search", label: "Built-in file_search (vector stores)" },
+          { value: "http_json", label: "Custom HTTP (your middleware)" },
         ],
       },
-      { key: "endpoint", label: "Endpoint / resource", type: "text", placeholder: "URL or resource path" },
+      { key: "toolName", label: "Function name / id", type: "text", placeholder: "get_weather…" },
+      {
+        key: "toolDescription",
+        label: "Function description",
+        type: "textarea",
+        rows: 2,
+        placeholder: "Shown to the model when toolKind=function",
+      },
+      {
+        key: "webSearchContext",
+        label: "Web search context budget",
+        type: "select",
+        options: [
+          { value: "low", label: "low" },
+          { value: "medium", label: "medium (default)" },
+          { value: "high", label: "high" },
+        ],
+      },
+      {
+        key: "allowedDomains",
+        label: "Allowed domains (optional)",
+        type: "text",
+        placeholder: "pubmed.ncbi.nlm.nih.gov, … comma-separated",
+      },
+      { key: "endpoint", label: "Custom endpoint (if HTTP)", type: "text", placeholder: "https://…" },
       { key: "timeoutMs", label: "Timeout (ms)", type: "number", placeholder: "800" },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Participants configure intent here; engineers map rows to actual JSON schemas / vector IDs.",
+      },
     ],
   },
   "process:skills": {
-    defaults: { packId: "workshop-default", injectMode: "prepend" },
+    apiMapping:
+      "Typically extra `system` / `developer` text, uploaded instruction files (`input_file`), or future Skills product hooks — same messaging stack as chat.",
+    defaults: { packId: "workshop-default", injectMode: "prepend", packFileStub: "" },
     fields: [
-      { key: "packId", label: "Skill pack id", type: "text", placeholder: "Bundled rules / docs" },
+      { key: "packId", label: "Pack name / id", type: "text", placeholder: "HR policy pack v3" },
       {
         key: "injectMode",
-        label: "Injection mode",
+        label: "How to merge",
         type: "select",
         options: [
-          { value: "prepend", label: "Prepend to system" },
-          { value: "append", label: "Append after instructions" },
-          { value: "tool-only", label: "Tool-visible only (mock)" },
+          { value: "prepend", label: "Prepend to system/developer message" },
+          { value: "append", label: "Append after user instructions" },
+          { value: "file_only", label: "Attach as `input_file` parts" },
         ],
+      },
+      {
+        key: "packFileStub",
+        label: "Upload pack (.md / .txt)",
+        type: "dropzone",
+        accept: ".md,.txt,.pdf",
+        dropLabel: "Drop instruction file",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop-friendly: treat packs as curated markdown; engineers wire to Files API + retrieval as needed.",
       },
     ],
   },
   "output:text": {
-    defaults: { format: "markdown", maxTokens: "512" },
+    apiMapping:
+      "Assistant `content` in Chat Completions, or `output_text` items in Responses — `response_format`, streaming.",
+    defaults: {
+      format: "markdown",
+      maxCompletionTokens: "1024",
+      stream: "false",
+      jsonSchemaStub: "",
+    },
     fields: [
       {
         key: "format",
-        label: "Format",
+        label: "Presentation",
         type: "select",
         options: [
-          { value: "markdown", label: "Markdown" },
+          { value: "markdown", label: "Markdown (rendered client-side)" },
           { value: "plain", label: "Plain text" },
-          { value: "json", label: "JSON (mock)" },
+          { value: "json_schema", label: "Structured JSON (schema on server)" },
         ],
       },
-      { key: "maxTokens", label: "Max output tokens", type: "number", placeholder: "e.g. 512" },
+      {
+        key: "maxCompletionTokens",
+        label: "Max output tokens",
+        type: "number",
+        placeholder: "1024",
+      },
+      {
+        key: "stream",
+        label: "Stream to UI",
+        type: "select",
+        options: [
+          { value: "false", label: "No" },
+          { value: "true", label: "Yes" },
+        ],
+      },
+      {
+        key: "jsonSchemaStub",
+        label: "JSON schema file (optional)",
+        type: "dropzone",
+        accept: ".json,.schema",
+        dropLabel: "Drop schema draft (not executed here)",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Structured outputs: prefer `response_format.type = json_schema` on supported models (see Structured Outputs guide).",
+      },
     ],
   },
   "output:image": {
-    defaults: { width: "512", height: "512", style: "flat illustration, soft light" },
+    apiMapping:
+      "POST `/v1/images/generations` — `model` (`gpt-image-1.5`, `dall-e-3`, …), `prompt`, `size`, `quality`, `n`, `output_format`, `background`.",
+    defaults: {
+      prompt: "Flat vector illustration of a team workshop at a whiteboard, soft daylight.",
+      model: "gpt-image-1.5",
+      size: "1024x1024",
+      quality: "medium",
+      n: "1",
+      outputFormat: "png",
+      background: "auto",
+    },
     fields: [
-      { key: "width", label: "Width (px)", type: "number", placeholder: "512" },
-      { key: "height", label: "Height (px)", type: "number", placeholder: "512" },
       {
-        key: "style",
-        label: "Style / notes",
+        key: "prompt",
+        label: "Image prompt",
         type: "textarea",
-        rows: 2,
-        placeholder: "Hints for the image head",
+        rows: 3,
+        placeholder: "Describe the scene, style, constraints",
+      },
+      {
+        key: "model",
+        label: "Model",
+        type: "select",
+        options: [
+          { value: "gpt-image-1.5", label: "gpt-image-1.5" },
+          { value: "gpt-image-1", label: "gpt-image-1" },
+          { value: "gpt-image-1-mini", label: "gpt-image-1-mini" },
+          { value: "dall-e-3", label: "dall-e-3" },
+          { value: "dall-e-2", label: "dall-e-2" },
+        ],
+      },
+      {
+        key: "size",
+        label: "Size",
+        type: "select",
+        options: [
+          { value: "1024x1024", label: "1024×1024" },
+          { value: "1536x1024", label: "1536×1024 (landscape)" },
+          { value: "1024x1536", label: "1024×1536 (portrait)" },
+          { value: "auto", label: "auto (supported models)" },
+        ],
+      },
+      {
+        key: "quality",
+        label: "Quality",
+        type: "select",
+        options: [
+          { value: "auto", label: "auto" },
+          { value: "low", label: "low" },
+          { value: "medium", label: "medium" },
+          { value: "high", label: "high" },
+          { value: "hd", label: "hd (DALL·E 3)" },
+          { value: "standard", label: "standard (DALL·E 3)" },
+        ],
+      },
+      { key: "n", label: "Number of images", type: "number", placeholder: "1–10 (DALL·E 3 allows 1)" },
+      {
+        key: "outputFormat",
+        label: "File format (GPT image models)",
+        type: "select",
+        options: [
+          { value: "png", label: "png" },
+          { value: "jpeg", label: "jpeg" },
+          { value: "webp", label: "webp" },
+        ],
+      },
+      {
+        key: "background",
+        label: "Background",
+        type: "select",
+        options: [
+          { value: "auto", label: "auto" },
+          { value: "opaque", label: "opaque" },
+          { value: "transparent", label: "transparent (png/webp)" },
+        ],
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "GPT image models return base64 by default; DALL·E 2/3 can return temporary URLs (`response_format`).",
       },
     ],
   },
   "output:audio": {
-    defaults: { voice: "neutral-en", speed: "1.0" },
+    apiMapping:
+      "POST `/v1/audio/speech` — `model` (`gpt-4o-mini-tts`, `tts-1`, …), `input` text, `voice`, `instructions` (mini TTS), `speed`, `response_format`, `stream_format`.",
+    defaults: {
+      speechInput: "Welcome to the workshop! Here is a quick audio summary of the agenda.",
+      model: "gpt-4o-mini-tts",
+      voice: "alloy",
+      speed: "1.0",
+      responseFormat: "mp3",
+      voiceInstructions: "Speak warmly and slightly slowly for a live room.",
+    },
     fields: [
       {
-        key: "voice",
-        label: "Voice profile",
+        key: "speechInput",
+        label: "Text to speak",
+        type: "textarea",
+        rows: 3,
+        placeholder: "Up to ~4k characters for the speech endpoint",
+      },
+      {
+        key: "model",
+        label: "TTS model",
         type: "select",
         options: [
-          { value: "neutral-en", label: "Neutral · EN" },
-          { value: "warm-en", label: "Warm · EN" },
-          { value: "de-de", label: "DE · mock" },
+          { value: "gpt-4o-mini-tts", label: "gpt-4o-mini-tts (style instructions)" },
+          { value: "tts-1-hd", label: "tts-1-hd" },
+          { value: "tts-1", label: "tts-1" },
         ],
       },
-      { key: "speed", label: "Playback speed", type: "text", placeholder: "1.0" },
+      {
+        key: "voice",
+        label: "Voice",
+        type: "select",
+        options: [
+          { value: "alloy", label: "alloy" },
+          { value: "ash", label: "ash" },
+          { value: "ballad", label: "ballad" },
+          { value: "coral", label: "coral" },
+          { value: "echo", label: "echo" },
+          { value: "sage", label: "sage" },
+          { value: "shimmer", label: "shimmer" },
+          { value: "verse", label: "verse" },
+          { value: "marin", label: "marin" },
+          { value: "cedar", label: "cedar" },
+        ],
+      },
+      { key: "speed", label: "Speed (0.25–4.0)", type: "text", placeholder: "1.0" },
+      {
+        key: "responseFormat",
+        label: "Audio format",
+        type: "select",
+        options: [
+          { value: "mp3", label: "mp3" },
+          { value: "wav", label: "wav" },
+          { value: "aac", label: "aac" },
+          { value: "opus", label: "opus" },
+        ],
+      },
+      {
+        key: "voiceInstructions",
+        label: "Delivery instructions (mini TTS only)",
+        type: "textarea",
+        rows: 2,
+        placeholder: "Ignored for tts-1 / tts-1-hd",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Streaming playback: `stream_format` supports `sse` or `audio` on newer models — workshop UIs can progressively play chunks.",
+      },
     ],
   },
   "output:audio-live": {
-    defaults: { transport: "websocket", bitrateKbps: "128" },
+    apiMapping:
+      "Realtime audio out or streamed speech — combine Realtime session with `modalities: [\"text\",\"audio\"]` on audio-capable chat models for simpler cases.",
+    defaults: {
+      transport: "webrtc",
+      playoutVoice: "marin",
+      streamFormat: "audio",
+      bitrateKbps: "160",
+    },
     fields: [
       {
         key: "transport",
-        label: "Stream transport",
+        label: "Delivery",
         type: "select",
         options: [
-          { value: "websocket", label: "WebSocket (mock)" },
-          { value: "webrtc", label: "WebRTC (mock)" },
+          { value: "webrtc", label: "WebRTC (low latency)" },
+          { value: "websocket", label: "WebSocket" },
+          { value: "sse", label: "SSE (`stream_format: sse` for TTS)" },
         ],
       },
-      { key: "bitrateKbps", label: "Target bitrate (kbps)", type: "number", placeholder: "128" },
+      {
+        key: "playoutVoice",
+        label: "Voice",
+        type: "select",
+        options: [
+          { value: "marin", label: "marin" },
+          { value: "cedar", label: "cedar" },
+          { value: "alloy", label: "alloy" },
+          { value: "shimmer", label: "shimmer" },
+        ],
+      },
+      {
+        key: "streamFormat",
+        label: "Chunk format",
+        type: "select",
+        options: [
+          { value: "audio", label: "audio" },
+          { value: "sse", label: "sse" },
+        ],
+      },
+      { key: "bitrateKbps", label: "Target bitrate (kbps)", type: "number", placeholder: "160" },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Expose transport + voice only; engineers bind to Realtime events or streamed TTS responses.",
+      },
     ],
   },
   "output:video": {
-    defaults: { resolution: "1080p", fps: "30", durationSec: "12" },
+    apiMapping:
+      "OpenAI does not ship a first-party “text-to-video clip” API in the core reference — treat as downstream compositing (FFmpeg, NLE) or partner video models.",
+    defaults: { resolution: "1920x1080", fps: "30", durationSec: "12", exportHint: "H.264 MP4 via post pipeline" },
     fields: [
-      { key: "resolution", label: "Resolution", type: "text", placeholder: "1080p" },
+      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1920x1080" },
       { key: "fps", label: "Frame rate", type: "number", placeholder: "30" },
       { key: "durationSec", label: "Duration (sec)", type: "number", placeholder: "12" },
+      {
+        key: "exportHint",
+        label: "Export / codec hint",
+        type: "text",
+        placeholder: "For your media worker",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop honesty: keep this block for storyboards + narration timing; generate stills with Images API, audio with Speech, mux offline.",
+      },
     ],
   },
   "output:video-live": {
-    defaults: { mixerLayout: "pip-right", encoder: "h264" },
+    apiMapping:
+      "Browser compositor (Canvas/WebRTC) — not an OpenAI REST primitive; pair with Realtime for audio while you control video layout client-side.",
+    defaults: { mixerLayout: "pip-right", encoder: "h264", branding: "Org logo overlay" },
     fields: [
       {
         key: "mixerLayout",
@@ -267,9 +890,16 @@ const FORM_SCHEMA = {
         label: "Encoder",
         type: "select",
         options: [
-          { value: "h264", label: "H.264 (mock)" },
-          { value: "vp9", label: "VP9 (mock)" },
+          { value: "h264", label: "H.264" },
+          { value: "vp9", label: "VP9" },
         ],
+      },
+      { key: "branding", label: "Overlay / branding note", type: "text", placeholder: "Optional" },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Use this card to capture production intent; implementation stays in your streaming stack.",
       },
     ],
   },
@@ -316,12 +946,20 @@ function createBlock(role, typeId) {
   return { id: uid(), role, typeId, values };
 }
 
+function stopBlockMedia(blockId) {
+  const stream = blockMediaStreams.get(blockId);
+  if (!stream) return;
+  stream.getTracks().forEach((t) => t.stop());
+  blockMediaStreams.delete(blockId);
+}
+
 function addBlock(role, typeId) {
   state.blocks.push(createBlock(role, typeId));
   renderAll();
 }
 
 function removeBlock(id) {
+  stopBlockMedia(id);
   state.blocks = state.blocks.filter((b) => b.id !== id);
   renderAll();
 }
@@ -365,6 +1003,180 @@ function renderMeta() {
   multi.classList.toggle("visible", inputs > 1);
 }
 
+function renderHintField(field, wrap) {
+  const p = document.createElement("p");
+  p.className = "field-hint";
+  p.textContent = field.hint || "";
+  wrap.appendChild(p);
+}
+
+function renderDropzoneField(field, blockId, values, disabled, wrap) {
+  const zone = document.createElement("div");
+  zone.className = "dropzone" + (disabled ? " is-disabled" : "");
+  zone.tabIndex = disabled ? -1 : 0;
+
+  const labelRow = document.createElement("div");
+  labelRow.className = "dropzone-label";
+  labelRow.textContent = field.dropLabel || "Drop files or browse";
+  zone.appendChild(labelRow);
+
+  const sub = document.createElement("div");
+  sub.className = "dropzone-sub";
+  const name = values[field.key] || "";
+  sub.textContent = name ? `Selected: ${name}` : "No file selected";
+  zone.appendChild(sub);
+
+  const inp = document.createElement("input");
+  inp.type = "file";
+  inp.className = "dropzone-input";
+  if (field.accept) inp.accept = field.accept;
+  inp.disabled = disabled;
+  inp.addEventListener("change", () => {
+    const f = inp.files && inp.files[0];
+    values[field.key] = f ? f.name : "";
+    sub.textContent = f ? `Selected: ${f.name}` : "No file selected";
+  });
+
+  zone.addEventListener("click", () => {
+    if (!disabled) inp.click();
+  });
+
+  function highlight(on) {
+    zone.classList.toggle("is-dragover", on);
+  }
+
+  zone.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    highlight(true);
+  });
+  zone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    highlight(true);
+  });
+  zone.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    if (!zone.contains(e.relatedTarget)) highlight(false);
+  });
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    highlight(false);
+    if (disabled) return;
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) {
+      values[field.key] = f.name;
+      sub.textContent = `Selected: ${f.name}`;
+    }
+  });
+
+  zone.appendChild(inp);
+  wrap.appendChild(zone);
+}
+
+function renderCameraPreviewField(field, block, disabled, wrap) {
+  const mode = field.mode === "video" ? "video" : "image";
+
+  const row = document.createElement("div");
+  row.className = "camera-preview";
+
+  const video = document.createElement("video");
+  video.className = "camera-preview-video";
+  video.muted = true;
+  video.playsInline = true;
+  video.setAttribute("playsinline", "");
+  row.appendChild(video);
+
+  const img = document.createElement("img");
+  img.className = "camera-preview-snap";
+  img.alt = "Captured frame preview";
+  img.hidden = true;
+  row.appendChild(img);
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "camera-preview-actions";
+
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "camera-preview-btn";
+  start.textContent = mode === "video" ? "Open camera" : "Open camera";
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "camera-preview-btn camera-preview-secondary";
+  stop.textContent = "Stop";
+  stop.disabled = true;
+  const snap =
+    mode === "image"
+      ? (() => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "camera-preview-btn";
+          b.textContent = "Capture still";
+          b.disabled = true;
+          return b;
+        })()
+      : null;
+
+  btnRow.appendChild(start);
+  if (snap) btnRow.appendChild(snap);
+  btnRow.appendChild(stop);
+  row.appendChild(btnRow);
+
+  const note = document.createElement("p");
+  note.className = "field-hint";
+  note.textContent =
+    mode === "video"
+      ? "Preview only — no frames are uploaded from this mock-up."
+      : "Capture stores a local preview only; a backend would sample frames for `image_url`.";
+  row.appendChild(note);
+
+  start.addEventListener("click", async () => {
+    if (disabled) return;
+    stopBlockMedia(block.id);
+    img.hidden = true;
+    const facingMode =
+      block.values.facing === "environment" ? "environment" : field.facing === "environment" ? "environment" : "user";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingMode },
+        audio: false,
+      });
+      blockMediaStreams.set(block.id, stream);
+      video.srcObject = stream;
+      await video.play();
+      start.disabled = true;
+      stop.disabled = false;
+      if (snap) snap.disabled = false;
+    } catch {
+      note.textContent = "Camera permission denied or unavailable in this context.";
+    }
+  });
+
+  stop.addEventListener("click", () => {
+    stopBlockMedia(block.id);
+    video.srcObject = null;
+    start.disabled = disabled;
+    stop.disabled = true;
+    if (snap) snap.disabled = true;
+  });
+
+  if (snap) {
+    snap.addEventListener("click", () => {
+      if (!video.videoWidth) return;
+      const c = document.createElement("canvas");
+      c.width = video.videoWidth;
+      c.height = video.videoHeight;
+      c.getContext("2d").drawImage(video, 0, 0);
+      try {
+        img.src = c.toDataURL("image/jpeg", 0.85);
+        img.hidden = false;
+      } catch {
+        note.textContent = "Could not snapshot (canvas tainted or unsupported).";
+      }
+    });
+  }
+
+  wrap.appendChild(row);
+}
+
 function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);
   if (!def) return;
@@ -396,6 +1208,13 @@ function renderModuleCard(block, container) {
   const sk = formSchemaKey(block.role, block.typeId);
   const schema = FORM_SCHEMA[sk];
 
+  if (schema && schema.apiMapping) {
+    const mapEl = document.createElement("p");
+    mapEl.className = "module-api-mapping";
+    mapEl.innerHTML = `<span class="module-api-mapping-k">API note</span> ${escapeHtml(schema.apiMapping)}`;
+    card.appendChild(mapEl);
+  }
+
   if (!schema || !schema.fields.length) {
     const p = document.createElement("p");
     p.className = "module-card-fallback";
@@ -409,21 +1228,32 @@ function renderModuleCard(block, container) {
   const form = document.createElement("div");
   form.className = "module-card-fields";
 
-  schema.fields.forEach((field) => {
+  const locked = state.running;
+
+  schema.fields.forEach((field, fidx) => {
     const wrap = document.createElement("div");
     wrap.className = "field field-compact";
-    const fid = `f-${block.id}-${field.key}`;
+    const fid = `f-${block.id}-n${fidx}`;
     let val = block.values[field.key];
     if (val === undefined || val === null) val = "";
 
-    const lab = document.createElement("label");
-    lab.htmlFor = fid;
-    lab.textContent = field.label;
-    wrap.appendChild(lab);
+    if (field.type === "hint") {
+      renderHintField(field, wrap);
+      form.appendChild(wrap);
+      return;
+    }
+
+    if (field.label) {
+      const lab = document.createElement("label");
+      lab.htmlFor = fid;
+      lab.textContent = field.label;
+      wrap.appendChild(lab);
+    }
 
     if (field.type === "textarea") {
       const ta = document.createElement("textarea");
       ta.id = fid;
+      ta.disabled = locked;
       ta.rows = field.rows ?? 2;
       if (field.placeholder) ta.placeholder = field.placeholder;
       ta.value = String(val);
@@ -434,6 +1264,7 @@ function renderModuleCard(block, container) {
     } else if (field.type === "select" && field.options) {
       const sel = document.createElement("select");
       sel.id = fid;
+      sel.disabled = locked;
       field.options.forEach((opt) => {
         const o = document.createElement("option");
         o.value = opt.value;
@@ -450,9 +1281,25 @@ function renderModuleCard(block, container) {
         block.values[field.key] = sel.value;
       });
       wrap.appendChild(sel);
+    } else if (field.type === "dropzone") {
+      renderDropzoneField(field, block.id, block.values, locked, wrap);
+    } else if (field.type === "camera_preview") {
+      renderCameraPreviewField(field, block, locked, wrap);
+    } else if (field.type === "file") {
+      const inp = document.createElement("input");
+      inp.type = "file";
+      inp.id = fid;
+      inp.disabled = locked;
+      if (field.accept) inp.accept = field.accept;
+      inp.addEventListener("change", () => {
+        const f = inp.files && inp.files[0];
+        block.values[field.key] = f ? f.name : "";
+      });
+      wrap.appendChild(inp);
     } else {
       const inp = document.createElement("input");
       inp.id = fid;
+      inp.disabled = locked;
       inp.type = field.type === "number" ? "number" : "text";
       if (field.placeholder) inp.placeholder = field.placeholder;
       inp.value = String(val);
@@ -619,9 +1466,11 @@ function applyRunTick() {
 
 function startMockRun() {
   if (state.running || !state.blocks.length) return;
+  state.blocks.forEach((b) => stopBlockMedia(b.id));
   state.running = true;
   updateRunChrome();
   lockPalette(true);
+  renderAll();
   applyRunTick();
   mockRunInterval = setInterval(applyRunTick, 2600);
 }
@@ -633,8 +1482,10 @@ function stopMockRun() {
     clearInterval(mockRunInterval);
     mockRunInterval = null;
   }
+  state.blocks.forEach((b) => stopBlockMedia(b.id));
   updateRunChrome();
   lockPalette(false);
+  renderAll();
 }
 
 function renderAll() {
@@ -646,6 +1497,7 @@ function renderAll() {
 }
 
 function applyPreset(presetId, silent) {
+  state.blocks.forEach((b) => stopBlockMedia(b.id));
   state.blocks = [];
 
   const presets = {
@@ -784,6 +1636,7 @@ function init() {
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
+    state.blocks.forEach((b) => stopBlockMedia(b.id));
     state.blocks = [];
     renderAll();
     showToast("Pipeline cleared.");
