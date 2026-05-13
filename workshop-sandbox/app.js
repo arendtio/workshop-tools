@@ -28,9 +28,7 @@ const OUTPUT_TYPES = [
   { id: "video-live", code: "V·L", title: "Video (live)", desc: "Live composite or stream out", live: true },
 ];
 
-const ROLE_LABEL = { input: "Input", process: "Process", output: "Output" };
-
-const ROLE_TAB_SHORT = { input: "In", process: "Proc", output: "Out" };
+const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
 
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
@@ -39,17 +37,15 @@ const ROLE_TAB_SHORT = { input: "In", process: "Proc", output: "Out" };
 const FORM_SCHEMA = {
   "input:text": {
     defaults: {
-      label: "User message",
       content: "Summarize the workshop goals in two bullet points.",
     },
     fields: [
-      { key: "label", label: "Trace label", type: "text", placeholder: "Shown in logs / run trace" },
       {
         key: "content",
-        label: "Text content",
+        label: "Text",
         type: "textarea",
-        rows: 5,
-        placeholder: "Typed or pasted prompt or data",
+        rows: 3,
+        placeholder: "Your prompt or data",
       },
     ],
   },
@@ -115,17 +111,17 @@ const FORM_SCHEMA = {
     fields: [
       {
         key: "system",
-        label: "System instructions",
+        label: "System",
         type: "textarea",
-        rows: 4,
-        placeholder: "Pinned behavior, tone, constraints",
+        rows: 2,
+        placeholder: "Behavior, tone, constraints",
       },
       {
         key: "user",
-        label: "User / task instructions",
+        label: "Instructions",
         type: "textarea",
-        rows: 4,
-        placeholder: "What the model should do with upstream inputs",
+        rows: 2,
+        placeholder: "What to do with the inputs",
       },
       { key: "temperature", label: "Temperature", type: "number", placeholder: "0–2" },
     ],
@@ -352,10 +348,10 @@ const MOCK_STEP = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string> }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string }[]} */
   blocks: [],
-  /** @type {string | null} */
-  selectedId: null,
+  /** Collapsible sections in the pipeline editor */
+  sectionOpen: { input: true, process: true, output: true },
 };
 
 let idSeq = 0;
@@ -390,35 +386,13 @@ function createBlock(role, typeId) {
   return { id: uid(), role, typeId, values };
 }
 
-function ensureSelection() {
-  if (!state.blocks.length) {
-    state.selectedId = null;
-    return;
-  }
-  if (!state.blocks.some((b) => b.id === state.selectedId)) {
-    state.selectedId = state.blocks[0].id;
-  }
-}
-
-function selectBlock(id) {
-  state.selectedId = id;
-  renderAll();
-}
-
 function addBlock(role, typeId) {
-  const b = createBlock(role, typeId);
-  state.blocks.push(b);
-  state.selectedId = b.id;
+  state.blocks.push(createBlock(role, typeId));
   renderAll();
 }
 
 function removeBlock(id) {
-  const idx = state.blocks.findIndex((b) => b.id === id);
   state.blocks = state.blocks.filter((b) => b.id !== id);
-  if (state.selectedId === id) {
-    const next = state.blocks[idx] ?? state.blocks[idx - 1] ?? null;
-    state.selectedId = next ? next.id : null;
-  }
   renderAll();
 }
 
@@ -457,103 +431,51 @@ function renderMeta() {
   multi.classList.toggle("visible", inputs > 1);
 }
 
-function renderBlockStrip() {
-  const root = document.getElementById("block-strip");
-  root.innerHTML = "";
-
-  if (!state.blocks.length) {
-    const empty = document.createElement("p");
-    empty.className = "block-strip-empty";
-    empty.textContent = "No modules yet — add one from the library on the left.";
-    root.appendChild(empty);
-    return;
-  }
-
-  state.blocks.forEach((item) => {
-    const def = findDef(item.role, item.typeId);
-    if (!def) return;
-
-    const cluster = document.createElement("div");
-    cluster.className =
-      "block-tab-cluster" +
-      (item.id === state.selectedId ? " selected" : "") +
-      (def.live ? " live" : "");
-
-    const tab = document.createElement("button");
-    tab.type = "button";
-    tab.className = "block-tab";
-    tab.setAttribute("aria-selected", item.id === state.selectedId ? "true" : "false");
-    tab.setAttribute("role", "tab");
-    tab.innerHTML = `
-      <span class="block-tab-code">${escapeHtml(def.code)}</span>
-      <span class="block-tab-title">${escapeHtml(def.title)}</span>
-      <span class="block-tab-role role-${item.role}">${escapeHtml(ROLE_TAB_SHORT[item.role])}</span>
-    `;
-    tab.addEventListener("click", () => selectBlock(item.id));
-
-    const rm = document.createElement("button");
-    rm.type = "button";
-    rm.className = "block-tab-remove";
-    rm.setAttribute("aria-label", `Remove ${def.title}`);
-    rm.textContent = "×";
-    rm.addEventListener("click", (e) => {
-      e.stopPropagation();
-      removeBlock(item.id);
-    });
-
-    cluster.appendChild(tab);
-    cluster.appendChild(rm);
-    root.appendChild(cluster);
-  });
-}
-
-function renderModuleForm() {
-  const root = document.getElementById("module-editor");
-  root.innerHTML = "";
-
-  if (!state.blocks.length) {
-    const wrap = document.createElement("div");
-    wrap.className = "module-editor-empty";
-    wrap.innerHTML =
-      "<p>No modules in the pipeline.</p><p class=\"hint\">Pick inputs, processing steps, and outputs from the library.</p>";
-    root.appendChild(wrap);
-    return;
-  }
-
-  const block = state.blocks.find((b) => b.id === state.selectedId);
-  if (!block) return;
-
+function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);
   if (!def) return;
+
+  const card = document.createElement("article");
+  card.className =
+    "module-card role-" +
+    block.role +
+    (def.live ? " live" : "");
+  card.dataset.blockId = block.id;
+
+  const head = document.createElement("div");
+  head.className = "module-card-head";
+  head.innerHTML = `
+    <span class="module-card-code">${escapeHtml(def.code)}</span>
+    <span class="module-card-title">${escapeHtml(def.title)}</span>
+  `;
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "module-card-remove";
+  rm.setAttribute("aria-label", `Remove ${def.title}`);
+  rm.textContent = "×";
+  rm.addEventListener("click", () => removeBlock(block.id));
+  head.appendChild(rm);
+  card.appendChild(head);
 
   const sk = formSchemaKey(block.role, block.typeId);
   const schema = FORM_SCHEMA[sk];
 
-  const header = document.createElement("div");
-  header.className = "module-form-head";
-  header.innerHTML = `
-    <span class="module-form-pill role-${block.role}">${escapeHtml(ROLE_LABEL[block.role])}</span>
-    <div class="module-form-titles">
-      <h3 class="module-form-title">${escapeHtml(def.title)}</h3>
-      <p class="module-form-desc">${escapeHtml(def.desc)}</p>
-    </div>
-  `;
-  root.appendChild(header);
-
   if (!schema || !schema.fields.length) {
     const p = document.createElement("p");
-    p.className = "module-form-fallback";
-    p.textContent = "No detailed form for this module type yet — mock values only.";
-    root.appendChild(p);
+    p.className = "module-card-fallback";
+    p.textContent = "No fields for this type (mock).";
+    card.appendChild(p);
+    appendRunPreviewRow(block, card);
+    container.appendChild(card);
     return;
   }
 
   const form = document.createElement("div");
-  form.className = "module-form-fields";
+  form.className = "module-card-fields";
 
   schema.fields.forEach((field) => {
     const wrap = document.createElement("div");
-    wrap.className = "field";
+    wrap.className = "field field-compact";
     const fid = `f-${block.id}-${field.key}`;
     let val = block.values[field.key];
     if (val === undefined || val === null) val = "";
@@ -566,7 +488,7 @@ function renderModuleForm() {
     if (field.type === "textarea") {
       const ta = document.createElement("textarea");
       ta.id = fid;
-      ta.rows = field.rows ?? 3;
+      ta.rows = field.rows ?? 2;
       if (field.placeholder) ta.placeholder = field.placeholder;
       ta.value = String(val);
       ta.addEventListener("input", () => {
@@ -607,19 +529,97 @@ function renderModuleForm() {
     form.appendChild(wrap);
   });
 
-  root.appendChild(form);
+  card.appendChild(form);
+  appendRunPreviewRow(block, card);
+  container.appendChild(card);
+}
+
+function appendRunPreviewRow(block, card) {
+  if (block.role !== "output") return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "field field-compact field-run-preview";
+  const lab = document.createElement("label");
+  lab.textContent =
+    block.typeId === "text" ? "Last run (mock)" : "Last run note (mock)";
+  wrap.appendChild(lab);
+
+  const ta = document.createElement("textarea");
+  ta.className = "run-preview-inline";
+  ta.readOnly = true;
+  ta.rows = block.typeId === "text" ? 5 : 2;
+  ta.placeholder =
+    block.typeId === "text"
+      ? "Run the pipeline to show a fabricated reply here."
+      : "Run to refresh mock asset / stream summary.";
+  ta.value = block.runPreview || "";
+  wrap.appendChild(ta);
+  card.appendChild(wrap);
+}
+
+function renderEditorSection(role, list, root) {
+  const section = document.createElement("section");
+  section.className = "editor-section";
+
+  const details = document.createElement("details");
+  details.className = "editor-section-details";
+  details.open = state.sectionOpen[role];
+  details.addEventListener("toggle", () => {
+    state.sectionOpen[role] = details.open;
+  });
+
+  const summary = document.createElement("summary");
+  summary.className = "editor-section-summary";
+  const title = ROLE_LABEL[role];
+  summary.innerHTML = `<span class="editor-section-title">${escapeHtml(title)}</span><span class="editor-section-badge">${list.length}</span>`;
+
+  const grid = document.createElement("div");
+  grid.className = "editor-grid";
+
+  if (!list.length) {
+    const empty = document.createElement("p");
+    empty.className = "editor-grid-empty";
+    empty.textContent = `No ${title.toLowerCase()} modules — add from the library.`;
+    grid.appendChild(empty);
+  } else {
+    list.forEach((block) => renderModuleCard(block, grid));
+  }
+
+  details.appendChild(summary);
+  details.appendChild(grid);
+  section.appendChild(details);
+  root.appendChild(section);
+}
+
+function renderModuleEditor() {
+  const root = document.getElementById("module-editor");
+  root.innerHTML = "";
+
+  if (!state.blocks.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "module-editor-empty";
+    wrap.innerHTML =
+      "<p>Pipeline is empty.</p><p class=\"hint\">Add inputs, processing, and outputs from the library on the left.</p>";
+    root.appendChild(wrap);
+    return;
+  }
+
+  const inputs = state.blocks.filter((b) => b.role === "input");
+  const procs = state.blocks.filter((b) => b.role === "process");
+  const outs = state.blocks.filter((b) => b.role === "output");
+
+  renderEditorSection("input", inputs, root);
+  renderEditorSection("process", procs, root);
+  renderEditorSection("output", outs, root);
 }
 
 function renderAll() {
-  ensureSelection();
   renderMeta();
-  renderBlockStrip();
-  renderModuleForm();
+  renderModuleEditor();
 }
 
 function applyPreset(presetId, silent) {
   state.blocks = [];
-  state.selectedId = null;
 
   const presets = {
     "text-prompt": {
@@ -666,7 +666,6 @@ function applyPreset(presetId, silent) {
   p.blocks.forEach((b) => {
     state.blocks.push(createBlock(b.role, b.typeId));
   });
-  state.selectedId = state.blocks[0]?.id ?? null;
 
   renderAll();
   if (!silent) {
@@ -774,11 +773,12 @@ function openRunModal() {
   const outs = blocks.filter((b) => b.role === "output").length;
 
   lede.textContent =
-    "Fabricated trace for each module. Order follows the pipeline strip; wiring would change dependencies.";
+    "Fabricated trace in sheet order. The main view keeps inputs, processing, and outputs visible while this runs.";
   summary.textContent = `${blocks.length} part${blocks.length === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output · mock session`;
 
   stepsRoot.innerHTML = "";
-  preview.textContent = buildMockPreview(blocks);
+  const previewStr = buildMockPreview(blocks);
+  preview.textContent = previewStr;
 
   const statusEls = [];
 
@@ -825,6 +825,35 @@ function openRunModal() {
     );
     t += 220;
   });
+
+  runAnimTimers.push(
+    setTimeout(() => {
+      injectRunPreviewIntoOutputs(previewStr);
+      renderAll();
+    }, t + 120)
+  );
+}
+
+function injectRunPreviewIntoOutputs(previewText) {
+  const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  if (textTargets.length === 1) {
+    textTargets[0].runPreview = previewText.trim();
+    return;
+  }
+  if (textTargets.length > 1) {
+    const share =
+      previewText.trim().split("\n\n")[0] +
+      "\n\n(mock: multiple text outputs — showing same preview in each for now)";
+    textTargets.forEach((b) => {
+      b.runPreview = share;
+    });
+    return;
+  }
+  state.blocks
+    .filter((b) => b.role === "output")
+    .forEach((b) => {
+      b.runPreview = "[mock] Non-text output — see combined preview in the run sheet.";
+    });
 }
 
 function closeRunModal() {
@@ -859,12 +888,16 @@ function init() {
 
   document.getElementById("btn-clear").addEventListener("click", () => {
     state.blocks = [];
-    state.selectedId = null;
     renderAll();
     showToast("Pipeline cleared.");
   });
 
   applyPreset("text-prompt", true);
+
+  if (location.hash === "#demo-shot") {
+    injectRunPreviewIntoOutputs(buildMockPreview(state.blocks));
+    renderAll();
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

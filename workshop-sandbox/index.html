@@ -11,7 +11,7 @@
       <div class="header-left">
         <div class="brand">
           <h1>AI Workshop Sandbox</h1>
-          <p>Add modules on the left, edit their settings in the center, then run — UI mock-up only.</p>
+          <p>Add modules on the left; inputs, processing, and outputs show together in the center — UI mock-up only.</p>
         </div>
         <div class="badges">
           <span class="badge mock">Mock-up</span>
@@ -26,7 +26,7 @@
     <main class="work-shell">
       <aside class="palette" aria-label="Block palette">
         <h2 class="palette-title">Module library</h2>
-        <p class="palette-lede">Click a part to append it to the pipeline. Select a tab above the editor to change its form.</p>
+        <p class="palette-lede">Click a part to append it to the pipeline. Fold sections in the editor to save vertical space.</p>
 
         <div class="palette-group">
           <h3 class="palette-group-title">Inputs</h3>
@@ -55,11 +55,8 @@
 
       <section class="workbench" aria-labelledby="workbench-title">
         <div class="workbench-head">
-          <h2 id="workbench-title">Module editor</h2>
+          <h2 id="workbench-title">Pipeline</h2>
           <span class="workbench-meta" id="workbench-meta"></span>
-        </div>
-        <div class="block-strip-wrap">
-          <div class="block-strip" id="block-strip" role="tablist" aria-label="Pipeline modules"></div>
         </div>
         <div class="workbench-surface module-editor-surface">
           <div class="module-editor" id="module-editor"></div>
@@ -72,7 +69,7 @@
 
     <footer class="status-bar">
       <span
-        >Floating Run opens a simulated trace (bottom sheet). No models or network; telemetry is fabricated.</span
+        >Run opens a simulated trace (bottom sheet); text outputs also get a “Last run” preview in place. No real models.</span
       >
     </footer>
 
