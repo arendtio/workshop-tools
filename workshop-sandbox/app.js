@@ -17,7 +17,6 @@ const INPUT_TYPES = [
 const PROCESS_TYPES = [
   { id: "instruction", code: "INS", title: "Instruction", desc: "Natural-language task or prompt", live: false },
   { id: "vector-db", code: "RAG", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
-  { id: "loop", code: "LP", title: "Loop / retry", desc: "Iterate until a condition is met", live: false },
   { id: "tooling", code: "TLS", title: "Tooling", desc: "APIs, code, external tools", live: false },
   { id: "skills", code: "SKL", title: "Skills / context", desc: "Bundled rules, docs, or skill packs", live: false },
 ];
@@ -36,9 +35,13 @@ const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
 /** @type {Map<string, MediaStream>} block id → active preview stream */
 const blockMediaStreams = new Map();
 
+/** @type {Map<string, { recorder: MediaRecorder, chunks: BlobPart[], statusEl: HTMLElement | null }>} */
+const blockMediaRecorders = new Map();
+
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
- * Field objects: type is one of text, textarea, number, select, dropzone, hint, camera_preview, file.
+ * Field objects: type is one of text, textarea, number, select, segmented, dropzone, hint,
+ * camera_preview, file, media_device, audio_record.
  * @type {Record<string, { apiMapping?: string, defaults: Record<string, string>, fields: object[] }>}
  */
 const FORM_SCHEMA = {
@@ -75,23 +78,20 @@ const FORM_SCHEMA = {
     apiMapping:
       "Chat Completions user content `image_url` (`url` + `detail`) or Responses `input_image` (`image_url` / `file_id`). Vision guide.",
     defaults: {
+      imageSource: "file",
       imageUrl: "",
       visionDetail: "auto",
-      altText: "Whiteboard sketch",
       uploadStub: "",
     },
     fields: [
       {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Either paste a public HTTPS URL, upload a file (your server should host or base64-wrap), or grab a live frame below.",
-      },
-      {
-        key: "imageUrl",
-        label: "Image URL",
-        type: "text",
-        placeholder: "https://… (or leave empty if you upload / capture)",
+        key: "imageSource",
+        label: "Source",
+        type: "segmented",
+        options: [
+          { value: "file", label: "File" },
+          { value: "url", label: "URL" },
+        ],
       },
       {
         key: "uploadStub",
@@ -99,6 +99,14 @@ const FORM_SCHEMA = {
         type: "dropzone",
         accept: "image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif",
         dropLabel: "Drop image here or click to browse",
+        showWhen: { key: "imageSource", is: "file" },
+      },
+      {
+        key: "imageUrl",
+        label: "Image URL (https)",
+        type: "text",
+        placeholder: "https://…",
+        showWhen: { key: "imageSource", is: "url" },
       },
       {
         key: "visionDetail",
@@ -110,13 +118,11 @@ const FORM_SCHEMA = {
           { value: "high", label: "high — finer detail" },
         ],
       },
-      { key: "altText", label: "Human description / caption", type: "text", placeholder: "Accessibility + better retrieval" },
       {
-        key: "_live",
-        label: "Live camera (browser)",
-        type: "camera_preview",
-        mode: "photo",
-        facing: "environment",
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Workshop: most people upload a file; your backend maps it to `image_url` or a hosted URL.",
       },
     ],
   },
@@ -125,6 +131,7 @@ const FORM_SCHEMA = {
       "POST `/v1/audio/transcriptions` — multipart `file` + `model` (e.g. `gpt-4o-transcribe`, `whisper-1`). Speech-to-text guide.",
     defaults: {
       uploadStub: "",
+      recordingStub: "",
       transcriptionModel: "gpt-4o-transcribe",
       language: "",
       responseShape: "text",
@@ -135,7 +142,12 @@ const FORM_SCHEMA = {
         label: "Audio file",
         type: "dropzone",
         accept: "audio/*,.mp3,.wav,.m4a,.webm,.mp4,.mpeg,.mpga",
-        dropLabel: "Drop audio or browse (mp3, wav, m4a, webm…)",
+        dropLabel: "Drop audio or browse",
+      },
+      {
+        key: "recordingStub",
+        label: "Or record from microphone",
+        type: "audio_record",
       },
       {
         key: "transcriptionModel",
@@ -168,7 +180,7 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Workshop: record in-browser or upload; backend forwards bytes as multipart `file`. Streaming supported with `stream=true` on supported models.",
+        hint: "Recording produces a blob your backend forwards as `file`; duration is derived automatically.",
       },
     ],
   },
@@ -179,7 +191,7 @@ const FORM_SCHEMA = {
       sessionGoal: "voice_agent",
       connection: "webrtc",
       model: "gpt-realtime-2",
-      device: "default-mic",
+      device: "",
       vadPreset: "server_vad",
     },
     fields: [
@@ -215,11 +227,8 @@ const FORM_SCHEMA = {
       {
         key: "device",
         label: "Microphone",
-        type: "select",
-        options: [
-          { value: "default-mic", label: "System default" },
-          { value: "usb-01", label: "USB headset (example)" },
-        ],
+        type: "media_device",
+        kind: "audioinput",
       },
       {
         key: "vadPreset",
@@ -241,7 +250,7 @@ const FORM_SCHEMA = {
   "input:video-live": {
     apiMapping:
       "Sample frames → Chat `image_url` parts or future video inputs; live path mirrors Realtime/WebRTC capture patterns.",
-    defaults: { source: "webcam", facing: "user", resolution: "1280x720" },
+    defaults: { source: "webcam", facing: "user", resolution: "1280x720", cameraDevice: "" },
     fields: [
       {
         key: "source",
@@ -252,10 +261,17 @@ const FORM_SCHEMA = {
           { value: "screen", label: "Screen share" },
         ],
       },
+      {
+        key: "cameraDevice",
+        label: "Camera",
+        type: "media_device",
+        kind: "videoinput",
+        showWhen: { key: "source", is: "webcam" },
+      },
       { key: "facing", label: "Camera facing", type: "select", options: [
         { value: "user", label: "Front / selfie" },
         { value: "environment", label: "Back / room" },
-      ] },
+      ], showWhen: { key: "source", is: "webcam" } },
       { key: "resolution", label: "Target resolution", type: "text", placeholder: "1280x720" },
       {
         key: "_live",
@@ -263,6 +279,7 @@ const FORM_SCHEMA = {
         type: "camera_preview",
         mode: "video",
         facing: "user",
+        showWhen: { key: "source", is: "webcam" },
       },
       {
         key: "_hint",
@@ -275,7 +292,7 @@ const FORM_SCHEMA = {
   "input:video-rec": {
     apiMapping:
       "No single “video understanding” upload in core API — extract key frames client-side or server-side, then use `image_url` / `input_image`.",
-    defaults: { uploadStub: "", startOffsetSec: "0", frameHint: "1 fps keyframes" },
+    defaults: { uploadStub: "" },
     fields: [
       {
         key: "uploadStub",
@@ -284,31 +301,25 @@ const FORM_SCHEMA = {
         accept: "video/*,.mp4,.webm,.mov,.mkv",
         dropLabel: "Drop video or browse",
       },
-      { key: "startOffsetSec", label: "Start offset (sec)", type: "number", placeholder: "0" },
-      {
-        key: "frameHint",
-        label: "Frame sampling for vision",
-        type: "text",
-        placeholder: "e.g. 1 fps — backend concern",
-      },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Tell participants the model sees images derived from video, not the raw timeline, unless you build that pipeline.",
+        hint: "Trim and prepare the clip before upload; the downstream pipeline samples frames as needed.",
       },
     ],
   },
   "process:instruction": {
     apiMapping:
-      "POST `/v1/chat/completions` or `/v1/responses` — `messages`, `model`, `temperature` / `reasoning_effort`, `max_completion_tokens`, `modalities`, `tools`.",
+      "POST `/v1/chat/completions` or `/v1/responses` — `messages`, `model`, `max_completion_tokens`, `reasoning_effort` (reasoning models), `modalities`, `tools`. Loop/retry is orchestrated in your app.",
     defaults: {
       instructionRole: "system",
       system:
         "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options.",
       user: "Explain how this pipeline would run end-to-end in one short paragraph.",
       model: "gpt-4o",
-      temperature: "0.4",
+      maxIterations: "4",
+      stopWhen: "Answer includes a numbered list.",
       maxCompletionTokens: "1024",
       outputModalities: "text",
       outputVoice: "alloy",
@@ -350,7 +361,14 @@ const FORM_SCHEMA = {
           { value: "gpt-4o-audio-preview", label: "gpt-4o-audio-preview (audio out)" },
         ],
       },
-      { key: "temperature", label: "Temperature (0–2)", type: "number", placeholder: "0.4" },
+      { key: "maxIterations", label: "Max iterations (agent / retry loop)", type: "number", placeholder: "4" },
+      {
+        key: "stopWhen",
+        label: "Stop condition (plain language)",
+        type: "textarea",
+        rows: 2,
+        placeholder: "When should the run stop retrying? (Your backend evaluates this.)",
+      },
       {
         key: "maxCompletionTokens",
         label: "Max completion tokens",
@@ -395,110 +413,29 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Reasoning models use `reasoning_effort` instead of temperature — expose a separate control in production if you target o-series / GPT-5 reasoning.",
+        hint: "Reasoning models: tune `reasoning_effort` on the server. Temperature is omitted here — set per-model defaults in the backend if needed.",
       },
     ],
   },
   "process:vector-db": {
     apiMapping:
-      "Vector stores (`POST /v1/vector_stores`) + Files API + Responses/Assistants `file_search` tool (`vector_store_ids`, `max_num_results`, filters).",
+      "Upload files → Vector store + `file_search` (`vector_store_ids`) in the Responses API. End users only pick files; indexing stays server-side.",
     defaults: {
-      vectorStoreId: "vs_workshop_docs",
-      maxNumResults: "8",
-      scoreThreshold: "0",
-      ranker: "auto",
-      chunking: "auto",
-      embeddingModel: "text-embedding-3-small",
-      filterJson: '{"team":"sandbox"}',
-      ingestFilesStub: "",
+      knowledgeFiles: "",
     },
     fields: [
       {
-        key: "vectorStoreId",
-        label: "Vector store ID",
-        type: "text",
-        placeholder: "vs_… from OpenAI dashboard or API",
-      },
-      {
-        key: "maxNumResults",
-        label: "Max chunks to retrieve",
-        type: "number",
-        placeholder: "1–50 for file_search",
-      },
-      {
-        key: "scoreThreshold",
-        label: "Score threshold (0–1, optional)",
-        type: "text",
-        placeholder: "0 = off / API default",
-      },
-      {
-        key: "ranker",
-        label: "Hybrid ranker",
-        type: "select",
-        options: [
-          { value: "auto", label: "auto" },
-          { value: "default-2024-11-15", label: "default-2024-11-15" },
-        ],
-      },
-      {
-        key: "chunking",
-        label: "Chunking (ingest)",
-        type: "select",
-        options: [
-          { value: "auto", label: "auto chunking" },
-          { value: "static", label: "static (custom overlap)" },
-        ],
-      },
-      {
-        key: "embeddingModel",
-        label: "Embedding model (indexing)",
-        type: "select",
-        options: [
-          { value: "text-embedding-3-small", label: "text-embedding-3-small" },
-          { value: "text-embedding-3-large", label: "text-embedding-3-large" },
-          { value: "text-embedding-ada-002", label: "text-embedding-ada-002" },
-        ],
-      },
-      {
-        key: "filterJson",
-        label: "Metadata filter (JSON)",
-        type: "textarea",
-        rows: 2,
-        placeholder: '{"key":{"eq":"value"}}',
-      },
-      {
-        key: "ingestFilesStub",
-        label: "Documents to index (upload)",
+        key: "knowledgeFiles",
+        label: "Knowledge files",
         type: "dropzone",
-        accept: ".pdf,.txt,.md,.doc,.docx,.html,.csv",
-        dropLabel: "Drop knowledge files (processed server-side)",
+        accept: ".pdf,.txt,.md,.markdown,.doc,.docx,.html,.csv,.png,.jpg,.jpeg,.webp,.gif",
+        dropLabel: "Drop one or more files (PDF, text, Office, images …)",
       },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Workshop story: uploads become `file_id`s attached to a vector store; the model consumes retrieved snippets via `file_search`, not raw uploads.",
-      },
-    ],
-  },
-  "process:loop": {
-    apiMapping:
-      "Application-level control (max tool rounds / agent loop) — combine Chat `tool_choice` / Responses tools with your own orchestration.",
-    defaults: { maxIterations: "4", stopWhen: "Answer includes a numbered list." },
-    fields: [
-      { key: "maxIterations", label: "Max iterations", type: "number", placeholder: "4" },
-      {
-        key: "stopWhen",
-        label: "Stop condition (plain language)",
-        type: "textarea",
-        rows: 2,
-        placeholder: "When should the loop exit?",
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "OpenAI does not auto-loop for arbitrary NL stop text — your backend evaluates this between calls.",
+        hint: "Your backend ingests these into a vector store / file search; participants do not manage collection IDs.",
       },
     ],
   },
@@ -953,13 +890,31 @@ function stopBlockMedia(blockId) {
   blockMediaStreams.delete(blockId);
 }
 
+function stopBlockRecorder(blockId) {
+  const entry = blockMediaRecorders.get(blockId);
+  if (!entry) return;
+  try {
+    if (entry.recorder && entry.recorder.state !== "inactive") {
+      entry.recorder.stop();
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  blockMediaRecorders.delete(blockId);
+}
+
+function stopBlockCapture(blockId) {
+  stopBlockMedia(blockId);
+  stopBlockRecorder(blockId);
+}
+
 function addBlock(role, typeId) {
   state.blocks.push(createBlock(role, typeId));
   renderAll();
 }
 
 function removeBlock(id) {
-  stopBlockMedia(id);
+  stopBlockCapture(id);
   state.blocks = state.blocks.filter((b) => b.id !== id);
   renderAll();
 }
@@ -1072,6 +1027,169 @@ function renderDropzoneField(field, blockId, values, disabled, wrap) {
   wrap.appendChild(zone);
 }
 
+function renderSegmentedField(field, block, disabled, wrap) {
+  const bar = document.createElement("div");
+  bar.className = "field-segmented";
+  bar.setAttribute("role", "tablist");
+  (field.options || []).forEach((opt) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "segmented-opt" + (String(block.values[field.key]) === opt.value ? " is-active" : "");
+    b.textContent = opt.label;
+    b.disabled = disabled;
+    b.addEventListener("click", () => {
+      if (disabled) return;
+      block.values[field.key] = opt.value;
+      renderAll();
+    });
+    bar.appendChild(b);
+  });
+  wrap.appendChild(bar);
+}
+
+async function fillMediaDeviceSelect(selectEl, kind) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const preserve = selectEl.value;
+  let devices = [];
+  try {
+    devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === kind);
+  } catch {
+    return;
+  }
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = kind === "audioinput" ? "Default microphone" : "Default camera";
+  selectEl.innerHTML = "";
+  selectEl.appendChild(def);
+  devices.forEach((d) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `${kind.replace("input", "")} (${d.deviceId.slice(0, 6)}…)`;
+    selectEl.appendChild(o);
+  });
+  if (preserve && [...selectEl.options].some((o) => o.value === preserve)) {
+    selectEl.value = preserve;
+  }
+}
+
+function renderMediaDeviceField(field, block, disabled, wrap) {
+  const row = document.createElement("div");
+  row.className = "media-device-row";
+
+  const sel = document.createElement("select");
+  sel.disabled = disabled;
+  const kind = field.kind === "videoinput" ? "videoinput" : "audioinput";
+
+  sel.addEventListener("change", () => {
+    block.values[field.key] = sel.value;
+  });
+
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "media-device-refresh";
+  refresh.textContent = "Refresh";
+  refresh.disabled = disabled;
+  refresh.addEventListener("click", async () => {
+    await fillMediaDeviceSelect(sel, kind);
+    showToast("Device list refreshed.");
+  });
+
+  row.appendChild(sel);
+  row.appendChild(refresh);
+  wrap.appendChild(row);
+
+  fillMediaDeviceSelect(sel, kind).then(() => {
+    const v = block.values[field.key] || "";
+    if (v && [...sel.options].some((o) => o.value === v)) {
+      sel.value = v;
+    } else {
+      block.values[field.key] = sel.value || "";
+    }
+  });
+}
+
+function renderAudioRecordField(field, block, disabled, wrap) {
+  const row = document.createElement("div");
+  row.className = "audio-recorder";
+
+  const status = document.createElement("div");
+  status.className = "audio-recorder-status";
+  status.textContent = block.values[field.key] ? `Stored: ${block.values[field.key]}` : "No recording yet";
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "audio-recorder-actions";
+
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "audio-recorder-btn";
+  start.textContent = "Record";
+  start.disabled = disabled;
+
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "audio-recorder-btn audio-recorder-secondary";
+  stop.textContent = "Stop";
+  stop.disabled = true;
+
+  btnRow.appendChild(start);
+  btnRow.appendChild(stop);
+  row.appendChild(btnRow);
+  row.appendChild(status);
+
+  start.addEventListener("click", async () => {
+    if (disabled) return;
+    stopBlockRecorder(block.id);
+    block.values[field.key] = "";
+    status.textContent = "Requesting microphone…";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      const chunks = [];
+      rec.addEventListener("dataavailable", (e) => {
+        if (e.data.size) chunks.push(e.data);
+      });
+      rec.addEventListener("stop", () => {
+        stream.getTracks().forEach((t) => t.stop());
+        if (chunks.length) {
+          const ext = mime && mime.includes("webm") ? "webm" : "m4a";
+          const name = `recording-${Date.now()}.${ext}`;
+          block.values[field.key] = name;
+          status.textContent = `Recorded: ${name} (blob kept locally for your backend)`;
+        } else {
+          status.textContent = "Recording empty — try again.";
+        }
+        blockMediaRecorders.delete(block.id);
+        start.disabled = disabled;
+        stop.disabled = true;
+      });
+      rec.start(200);
+      blockMediaRecorders.set(block.id, { recorder: rec, chunks, statusEl: status });
+      start.disabled = true;
+      stop.disabled = false;
+    } catch {
+      status.textContent = "Microphone not available or denied.";
+    }
+  });
+
+  stop.addEventListener("click", () => {
+    const entry = blockMediaRecorders.get(block.id);
+    if (entry && entry.recorder && entry.recorder.state !== "inactive") {
+      try {
+        entry.recorder.stop();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  });
+
+  wrap.appendChild(row);
+}
+
 function renderCameraPreviewField(field, block, disabled, wrap) {
   const mode = field.mode === "video" ? "video" : "image";
 
@@ -1135,8 +1253,13 @@ function renderCameraPreviewField(field, block, disabled, wrap) {
     const facingMode =
       block.values.facing === "environment" ? "environment" : field.facing === "environment" ? "environment" : "user";
     try {
+      const vdev = mode === "video" ? block.values.cameraDevice : "";
+      const videoConstraint =
+        mode === "video" && vdev
+          ? { deviceId: { exact: vdev } }
+          : { facingMode: facingMode };
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingMode },
+        video: videoConstraint,
         audio: false,
       });
       blockMediaStreams.set(block.id, stream);
@@ -1231,6 +1354,11 @@ function renderModuleCard(block, container) {
   const locked = state.running;
 
   schema.fields.forEach((field, fidx) => {
+    if (field.showWhen) {
+      const cur = block.values[field.showWhen.key];
+      if (cur !== field.showWhen.is) return;
+    }
+
     const wrap = document.createElement("div");
     wrap.className = "field field-compact";
     const fid = `f-${block.id}-n${fidx}`;
@@ -1248,6 +1376,22 @@ function renderModuleCard(block, container) {
       lab.htmlFor = fid;
       lab.textContent = field.label;
       wrap.appendChild(lab);
+    }
+
+    if (field.type === "segmented") {
+      renderSegmentedField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
+    }
+    if (field.type === "media_device") {
+      renderMediaDeviceField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
+    }
+    if (field.type === "audio_record") {
+      renderAudioRecordField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
     }
 
     if (field.type === "textarea") {
@@ -1279,6 +1423,9 @@ function renderModuleCard(block, container) {
       }
       sel.addEventListener("change", () => {
         block.values[field.key] = sel.value;
+        if (field.key === "source" && block.role === "input" && block.typeId === "video-live") {
+          renderAll();
+        }
       });
       wrap.appendChild(sel);
     } else if (field.type === "dropzone") {
@@ -1315,6 +1462,18 @@ function renderModuleCard(block, container) {
   card.appendChild(form);
   appendRunPreviewRow(block, card);
   container.appendChild(card);
+}
+
+function sendInputsBatch() {
+  const inputs = state.blocks.filter((b) => b.role === "input");
+  if (!inputs.length) {
+    showToast("No input modules — add some from the library.");
+    return;
+  }
+  showToast("Inputs submitted (mock). Your backend would send the current input state together.");
+  if (state.running) {
+    applyRunTick();
+  }
 }
 
 function appendRunPreviewRow(block, card) {
@@ -1371,6 +1530,23 @@ function renderEditorSection(role, list, root) {
 
   details.appendChild(summary);
   details.appendChild(grid);
+  if (role === "input" && list.length) {
+    const bar = document.createElement("div");
+    bar.className = "input-section-actions";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "input-send-btn";
+    btn.textContent = "Send inputs";
+    btn.disabled = state.running;
+    btn.addEventListener("click", () => sendInputsBatch());
+    const hint = document.createElement("p");
+    hint.className = "input-section-actions-hint";
+    hint.textContent =
+      "Push updated inputs together (e.g. new text + image). Mock only — connect your backend.";
+    bar.appendChild(btn);
+    bar.appendChild(hint);
+    details.appendChild(bar);
+  }
   section.appendChild(details);
   root.appendChild(section);
 }
@@ -1441,8 +1617,14 @@ function updateRunChrome() {
   if (label) label.textContent = running ? "Stop" : "Run";
   fab.setAttribute("aria-pressed", running ? "true" : "false");
   fab.setAttribute("aria-label", running ? "Stop mock pipeline run" : "Start mock pipeline run");
-  if (play) play.hidden = running;
-  if (busy) busy.hidden = !running;
+  if (play) {
+    play.style.display = running ? "none" : "";
+    play.hidden = running;
+  }
+  if (busy) {
+    busy.style.display = running ? "" : "none";
+    busy.hidden = !running;
+  }
   document.body.classList.toggle("pipeline-running", running);
   const st = document.getElementById("status-bar-text");
   if (st) {
@@ -1466,7 +1648,7 @@ function applyRunTick() {
 
 function startMockRun() {
   if (state.running || !state.blocks.length) return;
-  state.blocks.forEach((b) => stopBlockMedia(b.id));
+  state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.running = true;
   updateRunChrome();
   lockPalette(true);
@@ -1482,7 +1664,7 @@ function stopMockRun() {
     clearInterval(mockRunInterval);
     mockRunInterval = null;
   }
-  state.blocks.forEach((b) => stopBlockMedia(b.id));
+  state.blocks.forEach((b) => stopBlockCapture(b.id));
   updateRunChrome();
   lockPalette(false);
   renderAll();
@@ -1497,7 +1679,7 @@ function renderAll() {
 }
 
 function applyPreset(presetId, silent) {
-  state.blocks.forEach((b) => stopBlockMedia(b.id));
+  state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.blocks = [];
 
   const presets = {
@@ -1532,7 +1714,6 @@ function applyPreset(presetId, silent) {
         { role: "input", typeId: "video-rec" },
         { role: "process", typeId: "instruction" },
         { role: "process", typeId: "skills" },
-        { role: "process", typeId: "loop" },
         { role: "output", typeId: "text" },
         { role: "output", typeId: "image" },
       ],
@@ -1586,6 +1767,17 @@ function buildMockPreview(blocks) {
       lines.push(userInstr + (String(instr.values.user || "").length > 160 ? "…" : ""));
       lines.push("");
     }
+    if (instr) {
+      const mi = String(instr.values.maxIterations || "").trim();
+      const swFull = String(instr.values.stopWhen || "");
+      const sw = swFull.trim().slice(0, 120);
+      if (mi || sw) {
+        lines.push("Retry / loop (instruction module):");
+        if (mi) lines.push(`- max iterations: ${mi}`);
+        if (sw) lines.push(`- stop when: ${sw}${swFull.length > 120 ? "…" : ""}`);
+        lines.push("");
+      }
+    }
     lines.push(
       "Here is a fabricated reply. A real run would use your form values, retrieval, and tools end-to-end."
     );
@@ -1636,7 +1828,7 @@ function init() {
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
-    state.blocks.forEach((b) => stopBlockMedia(b.id));
+    state.blocks.forEach((b) => stopBlockCapture(b.id));
     state.blocks = [];
     renderAll();
     showToast("Pipeline cleared.");
