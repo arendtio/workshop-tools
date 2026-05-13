@@ -24,9 +24,12 @@
     </header>
 
     <main class="work-shell">
-      <aside class="palette" aria-label="Block palette">
+      <aside class="palette" id="palette" aria-label="Block palette">
         <h2 class="palette-title">Module library</h2>
-        <p class="palette-lede">Click a part to append it to the pipeline. Fold sections in the editor to save vertical space.</p>
+        <p class="palette-lede" id="palette-lede">
+          Click a part to append it to the pipeline. While the pipeline is running, adding modules is disabled — edit existing
+          fields freely.
+        </p>
 
         <div class="palette-group">
           <h3 class="palette-group-title">Inputs</h3>
@@ -68,51 +71,27 @@
     </main>
 
     <footer class="status-bar">
-      <span
-        >Run opens a simulated trace (bottom sheet); text outputs also get a “Last run” preview in place. No real models.</span
+      <span id="status-bar-text"
+        >Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.</span
       >
     </footer>
 
-    <button type="button" class="fab-run" id="fab-run" aria-label="Run simulated pipeline">
-      <span class="fab-run-icon" aria-hidden="true">
+    <button type="button" class="fab-run" id="fab-run" aria-pressed="false" aria-label="Start mock pipeline run">
+      <span class="fab-run-icon fab-run-icon-play" aria-hidden="true">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
           <path d="M8 5v14l11-7L8 5z" />
         </svg>
       </span>
-      <span class="fab-run-label">Run</span>
+      <span class="fab-run-icon fab-run-icon-busy" aria-hidden="true" hidden>
+        <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <circle class="fab-spinner-track" cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.35" />
+          <circle class="fab-spinner-head" cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="14 42" />
+        </svg>
+      </span>
+      <span class="fab-run-label" id="fab-run-label">Run</span>
     </button>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-    <div
-      class="run-overlay"
-      id="run-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="run-dialog-title"
-      aria-hidden="true"
-      hidden
-    >
-      <div class="run-backdrop" id="run-backdrop"></div>
-      <div class="run-sheet">
-        <div class="run-sheet-handle" aria-hidden="true"></div>
-        <div class="run-panel-head">
-          <div class="run-panel-titles">
-            <h2 id="run-dialog-title">Simulated run</h2>
-            <p class="run-panel-lede" id="run-panel-lede"></p>
-          </div>
-          <button type="button" class="run-close" id="run-close" aria-label="Close run view">Close</button>
-        </div>
-        <div class="run-panel-body">
-          <div class="run-summary" id="run-summary"></div>
-          <ol class="run-steps" id="run-steps"></ol>
-          <section class="run-preview" aria-labelledby="run-preview-title">
-            <h3 id="run-preview-title">Mock combined output</h3>
-            <pre class="run-preview-box" id="run-preview"></pre>
-          </section>
-        </div>
-      </div>
-    </div>
 
     <script src="app.js"></script>
   </body>

@@ -275,83 +275,13 @@ const FORM_SCHEMA = {
   },
 };
 
-/** @type {Record<string, { detail: string, metric?: string }>} */
-const MOCK_STEP = {
-  "input:text": {
-    detail: "Read workshop buffer (mock): pasted prompt + inline notes.",
-    metric: "847 chars · UTF-8",
-  },
-  "input:image": {
-    detail: "Decoded still frame from mock upload path.",
-    metric: "1024×768 · sRGB · 2.1 MB",
-  },
-  "input:audio-rec": {
-    detail: "Loaded clip into memory ring (no disk I/O in mock).",
-    metric: "12.4 s · 44.1 kHz mono",
-  },
-  "input:audio-live": {
-    detail: "Subscribed to fake mic stream; chunking for downstream STT.",
-    metric: "320 ms frames · RMS −18 dBFS",
-  },
-  "input:video-live": {
-    detail: "Webcam path idle — emitting placeholder keyframes only.",
-    metric: "15 fps · 640×480 (mock)",
-  },
-  "input:video-rec": {
-    detail: "Indexed container; seek table built for random access.",
-    metric: "482 frames · H.264 · 24 fps",
-  },
-  "process:instruction": {
-    detail: "Merged system + user instructions; pinned safety block (mock).",
-    metric: "~1.2k tokens context",
-  },
-  "process:vector-db": {
-    detail: "ANN search over embedded workshop docs (simulated scores).",
-    metric: "3 hits · top 0.82",
-  },
-  "process:loop": {
-    detail: "Evaluator: condition not met — would schedule another pass.",
-    metric: "iteration 2 / 4 (cap)",
-  },
-  "process:tooling": {
-    detail: "Called external tool shim; latency injected for realism.",
-    metric: "POST /v1/mock-tool · 142 ms · 200",
-  },
-  "process:skills": {
-    detail: "Injected skill pack snippets into working context.",
-    metric: "4 files · ~12k tokens (mock)",
-  },
-  "output:text": {
-    detail: "Synthesized reply channel; streaming disabled in mock.",
-    metric: "412 tokens draft",
-  },
-  "output:image": {
-    detail: "Rasterized latent to PNG via fake decoder.",
-    metric: "512×512 · seed 9201",
-  },
-  "output:audio": {
-    detail: "Rendered speech waveform to buffer (no playback here).",
-    metric: "8.2 s · 24 kHz",
-  },
-  "output:audio-live": {
-    detail: "Opened live audio sink — would push PCM to speakers.",
-    metric: "chunked 20 ms",
-  },
-  "output:video": {
-    detail: "Muxed video track with overlays (mock timeline only).",
-    metric: "1080p · 30 fps · 12 s",
-  },
-  "output:video-live": {
-    detail: "Composite preview stream — encoder waiting on frames.",
-    metric: "WebRTC-like session (stub)",
-  },
-};
-
 const state = {
   /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
+  /** Continuous mock run (no modal) */
+  running: false,
 };
 
 let idSeq = 0;
@@ -422,10 +352,14 @@ function renderMeta() {
   const outs = state.blocks.filter((b) => b.role === "output").length;
   const meta = document.getElementById("workbench-meta");
   const n = state.blocks.length;
-  meta.textContent =
+  let line =
     n === 0
       ? "Nothing in pipeline"
       : `${n} part${n === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output`;
+  if (state.running && n > 0) {
+    line += " · mock run active";
+  }
+  meta.textContent = line;
 
   const multi = document.getElementById("multi-input-hint");
   multi.classList.toggle("visible", inputs > 1);
@@ -453,6 +387,8 @@ function renderModuleCard(block, container) {
   rm.className = "module-card-remove";
   rm.setAttribute("aria-label", `Remove ${def.title}`);
   rm.textContent = "×";
+  rm.disabled = state.running;
+  rm.classList.toggle("is-disabled", state.running);
   rm.addEventListener("click", () => removeBlock(block.id));
   head.appendChild(rm);
   card.appendChild(head);
@@ -547,6 +483,7 @@ function appendRunPreviewRow(block, card) {
   const ta = document.createElement("textarea");
   ta.className = "run-preview-inline";
   ta.readOnly = true;
+  ta.setAttribute("data-run-preview-block", block.id);
   ta.rows = block.typeId === "text" ? 5 : 2;
   ta.placeholder =
     block.typeId === "text"
@@ -613,7 +550,97 @@ function renderModuleEditor() {
   renderEditorSection("output", outs, root);
 }
 
+let mockRunInterval = null;
+
+function injectRunPreviewIntoOutputs(previewText) {
+  const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  if (textTargets.length === 1) {
+    textTargets[0].runPreview = previewText.trim();
+    return;
+  }
+  if (textTargets.length > 1) {
+    const share =
+      previewText.trim().split("\n\n")[0] +
+      "\n\n(mock: multiple text outputs — showing same preview in each for now)";
+    textTargets.forEach((b) => {
+      b.runPreview = share;
+    });
+    return;
+  }
+  state.blocks
+    .filter((b) => b.role === "output")
+    .forEach((b) => {
+      b.runPreview = "[mock] Non-text output — summary appears in Last run while the loop is active.";
+    });
+}
+
+function syncOutputPreviewFieldsFromState() {
+  state.blocks
+    .filter((b) => b.role === "output")
+    .forEach((b) => {
+      const el = document.querySelector(`textarea[data-run-preview-block="${b.id}"]`);
+      if (el) el.value = b.runPreview || "";
+    });
+}
+
+function updateRunChrome() {
+  const fab = document.getElementById("fab-run");
+  if (!fab) return;
+  const label = document.getElementById("fab-run-label");
+  const play = fab.querySelector(".fab-run-icon-play");
+  const busy = fab.querySelector(".fab-run-icon-busy");
+  const running = state.running;
+  fab.classList.toggle("is-running", running);
+  if (label) label.textContent = running ? "Stop" : "Run";
+  fab.setAttribute("aria-pressed", running ? "true" : "false");
+  fab.setAttribute("aria-label", running ? "Stop mock pipeline run" : "Start mock pipeline run");
+  if (play) play.hidden = running;
+  if (busy) busy.hidden = !running;
+  document.body.classList.toggle("pipeline-running", running);
+  const st = document.getElementById("status-bar-text");
+  if (st) {
+    st.textContent = running
+      ? "Mock run active — edit fields in place; library locked. Press Stop or Esc to end."
+      : "Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.";
+  }
+}
+
+function lockPalette(locked) {
+  const pal = document.getElementById("palette");
+  if (pal) pal.classList.toggle("palette-locked", locked);
+  const clearBtn = document.getElementById("btn-clear");
+  if (clearBtn) clearBtn.disabled = locked;
+}
+
+function applyRunTick() {
+  injectRunPreviewIntoOutputs(buildMockPreview(state.blocks));
+  syncOutputPreviewFieldsFromState();
+}
+
+function startMockRun() {
+  if (state.running || !state.blocks.length) return;
+  state.running = true;
+  updateRunChrome();
+  lockPalette(true);
+  applyRunTick();
+  mockRunInterval = setInterval(applyRunTick, 2600);
+}
+
+function stopMockRun() {
+  if (!state.running) return;
+  state.running = false;
+  if (mockRunInterval) {
+    clearInterval(mockRunInterval);
+    mockRunInterval = null;
+  }
+  updateRunChrome();
+  lockPalette(false);
+}
+
 function renderAll() {
+  if (!state.blocks.length && state.running) {
+    stopMockRun();
+  }
   renderMeta();
   renderModuleEditor();
 }
@@ -681,16 +708,6 @@ function showToast(message) {
   showToast._t = setTimeout(() => el.classList.remove("visible"), 3200);
 }
 
-function mockStepFor(block) {
-  const key = `${block.role}:${block.typeId}`;
-  return (
-    MOCK_STEP[key] || {
-      detail: "No specific mock copy for this pairing — placeholder activity only.",
-      metric: "stub",
-    }
-  );
-}
-
 function buildMockPreview(blocks) {
   const lines = [];
   const textOut = blocks.some((b) => b.role === "output" && b.typeId === "text");
@@ -740,126 +757,6 @@ function buildMockPreview(blocks) {
   return lines.join("\n");
 }
 
-let runAnimTimers = [];
-
-function clearRunAnimTimers() {
-  runAnimTimers.forEach((id) => clearTimeout(id));
-  runAnimTimers = [];
-}
-
-function setRunOpen(open) {
-  const overlay = document.getElementById("run-overlay");
-  overlay.hidden = !open;
-  overlay.setAttribute("aria-hidden", open ? "false" : "true");
-  document.body.classList.toggle("run-open", open);
-  if (open) {
-    document.getElementById("run-close").focus();
-  } else {
-    clearRunAnimTimers();
-    document.getElementById("fab-run").focus();
-  }
-}
-
-function openRunModal() {
-  clearRunAnimTimers();
-  const blocks = state.blocks.slice();
-  const lede = document.getElementById("run-panel-lede");
-  const summary = document.getElementById("run-summary");
-  const stepsRoot = document.getElementById("run-steps");
-  const preview = document.getElementById("run-preview");
-
-  const inputs = blocks.filter((b) => b.role === "input").length;
-  const proc = blocks.filter((b) => b.role === "process").length;
-  const outs = blocks.filter((b) => b.role === "output").length;
-
-  lede.textContent =
-    "Fabricated trace in sheet order. The main view keeps inputs, processing, and outputs visible while this runs.";
-  summary.textContent = `${blocks.length} part${blocks.length === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output · mock session`;
-
-  stepsRoot.innerHTML = "";
-  const previewStr = buildMockPreview(blocks);
-  preview.textContent = previewStr;
-
-  const statusEls = [];
-
-  blocks.forEach((block, idx) => {
-    const def = findDef(block.role, block.typeId);
-    if (!def) return;
-    const mock = mockStepFor(block);
-    const li = document.createElement("li");
-    li.className = "run-step";
-    const roleClass = block.role === "input" ? "in" : block.role === "process" ? "mid" : "out";
-    const roleShort = block.role === "input" ? "In" : block.role === "process" ? "Proc" : "Out";
-
-    li.innerHTML = `
-      <span class="run-step-num">${idx + 1}</span>
-      <div class="run-step-head">
-        <span class="run-step-role ${roleClass}">${escapeHtml(roleShort)}</span>
-        <span class="run-step-title">${escapeHtml(def.title)}</span>
-      </div>
-      <p class="run-step-detail">${escapeHtml(mock.detail)}${
-        mock.metric ? " · " + escapeHtml(mock.metric) : ""
-      }</p>
-      <div class="run-step-status pending" data-run-status>Pending</div>
-    `;
-    stepsRoot.appendChild(li);
-    statusEls.push(li.querySelector("[data-run-status]"));
-  });
-
-  setRunOpen(true);
-
-  let t = 120;
-  statusEls.forEach((el) => {
-    runAnimTimers.push(
-      setTimeout(() => {
-        el.textContent = "Running…";
-        el.className = "run-step-status running";
-      }, t)
-    );
-    t += 320;
-    runAnimTimers.push(
-      setTimeout(() => {
-        el.textContent = "Done (mock)";
-        el.className = "run-step-status done";
-      }, t)
-    );
-    t += 220;
-  });
-
-  runAnimTimers.push(
-    setTimeout(() => {
-      injectRunPreviewIntoOutputs(previewStr);
-      renderAll();
-    }, t + 120)
-  );
-}
-
-function injectRunPreviewIntoOutputs(previewText) {
-  const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
-  if (textTargets.length === 1) {
-    textTargets[0].runPreview = previewText.trim();
-    return;
-  }
-  if (textTargets.length > 1) {
-    const share =
-      previewText.trim().split("\n\n")[0] +
-      "\n\n(mock: multiple text outputs — showing same preview in each for now)";
-    textTargets.forEach((b) => {
-      b.runPreview = share;
-    });
-    return;
-  }
-  state.blocks
-    .filter((b) => b.role === "output")
-    .forEach((b) => {
-      b.runPreview = "[mock] Non-text output — see combined preview in the run sheet.";
-    });
-}
-
-function closeRunModal() {
-  setRunOpen(false);
-}
-
 function init() {
   renderPalette();
 
@@ -872,17 +769,17 @@ function init() {
       showToast("Pipeline is empty — add modules before a run would make sense.");
       return;
     }
-    openRunModal();
+    if (state.running) {
+      stopMockRun();
+    } else {
+      startMockRun();
+    }
   });
 
-  document.getElementById("run-close").addEventListener("click", closeRunModal);
-  document.getElementById("run-backdrop").addEventListener("click", closeRunModal);
-
   document.addEventListener("keydown", (e) => {
-    const overlay = document.getElementById("run-overlay");
-    if (e.key === "Escape" && !overlay.hidden) {
+    if (e.key === "Escape" && state.running) {
       e.preventDefault();
-      closeRunModal();
+      stopMockRun();
     }
   });
 
@@ -893,6 +790,7 @@ function init() {
   });
 
   applyPreset("text-prompt", true);
+  updateRunChrome();
 
   if (location.hash === "#demo-shot") {
     injectRunPreviewIntoOutputs(buildMockPreview(state.blocks));
