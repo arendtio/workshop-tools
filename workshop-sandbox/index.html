@@ -11,7 +11,7 @@
       <div class="header-left">
         <div class="brand">
           <h1>AI Workshop Sandbox</h1>
-          <p>A desk to wire pieces together, then run — UI mock-up only.</p>
+          <p>Add modules on the left, edit their settings in the center, then run — UI mock-up only.</p>
         </div>
         <div class="badges">
           <span class="badge mock">Mock-up</span>
@@ -19,15 +19,14 @@
         </div>
       </div>
       <div class="header-actions">
-        <button type="button" class="ghost" id="btn-clear">Clear sheet</button>
-        <button type="button" class="run" id="btn-run-mock">Run</button>
+        <button type="button" class="ghost" id="btn-clear">Clear pipeline</button>
       </div>
     </header>
 
     <main class="work-shell">
       <aside class="palette" aria-label="Block palette">
         <h2 class="palette-title">Module library</h2>
-        <p class="palette-lede">Add modules to the sheet; remove with ×. Wiring and execution order are defined later.</p>
+        <p class="palette-lede">Click a part to append it to the pipeline. Select a tab above the editor to change its form.</p>
 
         <div class="palette-group">
           <h3 class="palette-group-title">Inputs</h3>
@@ -56,23 +55,67 @@
 
       <section class="workbench" aria-labelledby="workbench-title">
         <div class="workbench-head">
-          <h2 id="workbench-title">Sheet</h2>
+          <h2 id="workbench-title">Module editor</h2>
           <span class="workbench-meta" id="workbench-meta"></span>
         </div>
-        <div class="workbench-surface" id="workbench-surface">
-          <div class="workbench-cards" id="workbench-cards"></div>
+        <div class="block-strip-wrap">
+          <div class="block-strip" id="block-strip" role="tablist" aria-label="Pipeline modules"></div>
+        </div>
+        <div class="workbench-surface module-editor-surface">
+          <div class="module-editor" id="module-editor"></div>
         </div>
         <p class="multi-hint" id="multi-input-hint">
-          Several inputs on the sheet — mixing modalities is OK; wiring rules come later.
+          Several inputs in the pipeline — mixing modalities is OK; wiring rules come later.
         </p>
       </section>
     </main>
 
     <footer class="status-bar">
-      <span>Run is a stub for now — it only nudges the workshop conversation, no models.</span>
+      <span
+        >Floating Run opens a simulated trace (bottom sheet). No models or network; telemetry is fabricated.</span
+      >
     </footer>
 
+    <button type="button" class="fab-run" id="fab-run" aria-label="Run simulated pipeline">
+      <span class="fab-run-icon" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 5v14l11-7L8 5z" />
+        </svg>
+      </span>
+      <span class="fab-run-label">Run</span>
+    </button>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <div
+      class="run-overlay"
+      id="run-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="run-dialog-title"
+      aria-hidden="true"
+      hidden
+    >
+      <div class="run-backdrop" id="run-backdrop"></div>
+      <div class="run-sheet">
+        <div class="run-sheet-handle" aria-hidden="true"></div>
+        <div class="run-panel-head">
+          <div class="run-panel-titles">
+            <h2 id="run-dialog-title">Simulated run</h2>
+            <p class="run-panel-lede" id="run-panel-lede"></p>
+          </div>
+          <button type="button" class="run-close" id="run-close" aria-label="Close run view">Close</button>
+        </div>
+        <div class="run-panel-body">
+          <div class="run-summary" id="run-summary"></div>
+          <ol class="run-steps" id="run-steps"></ol>
+          <section class="run-preview" aria-labelledby="run-preview-title">
+            <h3 id="run-preview-title">Mock combined output</h3>
+            <pre class="run-preview-box" id="run-preview"></pre>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <script src="app.js"></script>
   </body>
