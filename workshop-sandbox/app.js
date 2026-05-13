@@ -8,6 +8,20 @@
 const INPUT_TYPES = [
   { id: "text", code: "TXT", title: "Text", desc: "Typed or pasted text", live: false },
   { id: "image", code: "IMG", title: "Image", desc: "Upload or reference stills", live: false },
+  {
+    id: "form",
+    code: "FRM",
+    title: "Form",
+    desc: "Composer: build fields to collect participant input",
+    live: false,
+  },
+  {
+    id: "dynamic-ui",
+    code: "UI",
+    title: "UI (prompt)",
+    desc: "Describe UI to render — sliders, matrix, charts, …",
+    live: false,
+  },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streaming microphone", live: true },
   { id: "video-live", code: "V·L", title: "Video (live)", desc: "Webcam / screen stream", live: true },
@@ -30,6 +44,20 @@ const PROCESS_TYPES = [
 const OUTPUT_TYPES = [
   { id: "text", code: "TXT", title: "Text", desc: "Structured or free-form reply", live: false },
   { id: "image", code: "IMG", title: "Image", desc: "Generated or edited visuals", live: false },
+  {
+    id: "form",
+    code: "FRM",
+    title: "Form",
+    desc: "Same composer — show mock AI-filled previews",
+    live: false,
+  },
+  {
+    id: "dynamic-ui",
+    code: "UI",
+    title: "UI (prompt)",
+    desc: "Describe UI — edit prompt & resubmit for a fresh mock preview",
+    live: false,
+  },
   { id: "audio", code: "AUD", title: "Audio", desc: "Speech or sound file", live: false },
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
   { id: "video", code: "VID", title: "Video", desc: "Rendered or composed video", live: false },
@@ -528,6 +556,34 @@ const FORM_SCHEMA = {
       },
     ],
   },
+  "input:form": {
+    apiMapping:
+      "Structured collector — serialized to JSON / tool payloads on the backend. Composer is sandbox-only.",
+    defaults: {},
+    fields: [],
+  },
+  "input:dynamic-ui": {
+    apiMapping:
+      "Natural-language UI spec → rendered widgets in your host app (charts, sliders, matrices). Prompt + regen are UI-only mocks here.",
+    defaults: {
+      uiPrompt: "Drei Slider für Budget, Risiko und Zufriedenheit (je 0–100).",
+    },
+    fields: [],
+  },
+  "output:form": {
+    apiMapping:
+      "Structured presenter — e.g. model-populated defaults. Composer matches the Input form module.",
+    defaults: {},
+    fields: [],
+  },
+  "output:dynamic-ui": {
+    apiMapping:
+      "NL-driven UI on the output path — regenerate by editing prompt and submitting again.",
+    defaults: {
+      uiPrompt: "Ein Balkendiagramm mit vier Balken für Q1–Q4 (Demo-Zahlen).",
+    },
+    fields: [],
+  },
   "output:text": {
     apiMapping:
       "Assistant `content` in Chat Completions, or `output_text` in Responses — shown here as a chat-style thread for the workshop.",
@@ -809,7 +865,15 @@ function createBlock(role, typeId) {
   const sk = formSchemaKey(role, typeId);
   const schema = FORM_SCHEMA[sk];
   const values = schema ? { ...schema.defaults } : {};
-  return { id: uid(), role, typeId, values };
+  /** @type {{ id: string, role: string, typeId: string, values: Record<string, string>, formItems?: object[], dynamicUiCommitted?: string }} */
+  const block = { id: uid(), role, typeId, values };
+  if (typeId === "form") {
+    block.formItems = [];
+  }
+  if (typeId === "dynamic-ui") {
+    block.dynamicUiCommitted = "";
+  }
+  return block;
 }
 
 function stopBlockMedia(blockId) {
@@ -1302,6 +1366,30 @@ function gatherConversationSnapshotForTextOutput() {
           body: body || "(empty)",
           empty: !body,
         });
+      } else if (b.typeId === "form") {
+        const items = Array.isArray(b.formItems) ? b.formItems : [];
+        const lines = items.map((it, i) => {
+          const optEx = needsFormExtraOptions(it.typ) ? ` (${parseFormOptions(it.options).join("; ")})` : "";
+          return `${i + 1}. [${it.typ}] ${it.label}${optEx}`;
+        });
+        body = lines.length ? lines.join("\n") : "(no fields defined)";
+        userTurns.push({
+          label: `Form blueprint · ${partTitle}`,
+          body,
+          empty: !lines.length,
+        });
+      } else if (b.typeId === "dynamic-ui") {
+        const draft = String(b.values.uiPrompt || "").trim();
+        const staged = String(b.dynamicUiCommitted || "").trim();
+        body =
+          draft || staged
+            ? `${draft ? `Draft: ${draft}\n` : ""}${staged ? `Preview commits to: ${staged}` : ""}`.trim()
+            : "(prompt empty)";
+        userTurns.push({
+          label: `UI brief · ${partTitle}`,
+          body,
+          empty: !(draft || staged),
+        });
       } else {
         const url = b.values.imageUrl && String(b.values.imageUrl).trim();
         const up =
@@ -1500,6 +1588,558 @@ function appendImageOutputPlaceholder(block, card) {
   card.appendChild(stage);
 }
 
+const FORM_BUILDER_FIELD_TYPES = [
+  { value: "text", label: "Einzeiliges Textfeld" },
+  { value: "textarea", label: "Mehrzeiliges Textfeld" },
+  { value: "number", label: "Zahl" },
+  { value: "email", label: "E-Mail" },
+  { value: "select", label: "Auswahlliste" },
+  { value: "radio", label: "Radio-Gruppe" },
+  { value: "checkbox", label: "Checkbox" },
+  { value: "button", label: "Schaltfläche" },
+  { value: "submit", label: "Submit · Absenden" },
+  { value: "reset", label: "Zurücksetzen" },
+];
+
+function needsFormExtraOptions(typ) {
+  return typ === "radio" || typ === "select";
+}
+
+/**
+ * Demo values for Output form previews (read-only).
+ */
+function mockFilledControlState(item, index) {
+  const L = item.label || "";
+  const l = L.toLowerCase();
+  const typ = item.typ;
+  if (typ === "checkbox") {
+    if (/datenschutz|privacy|nutzungsbedingungen|akzeptieren/i.test(l)) return true;
+    return index % 2 === 0;
+  }
+  if (/vorname|^name\b/i.test(l)) return "Lee Beispiel";
+  if (/nachname/i.test(l)) return "Demonstrant";
+  if (/e-?mail/i.test(l)) return "lee@beispiel.de";
+  if (/telefon|phone|mobil/i.test(l)) return "+49 30 91234567";
+  if (typ === "number") return String(27 + index * 11);
+  if (/stadt|city|ort/i.test(l)) return "Hamburg";
+  if (/plz|postleitzahl/i.test(l)) return "20095";
+  if (typ === "textarea") return `Automatischer Fließtext für „${L || "Freitext"}“.`;
+  return `Auto (${L || typ})`;
+}
+
+function parseFormOptions(optionsStr) {
+  return String(optionsStr || "")
+    .split(/[,;|]/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Stub UI from keywords in `committedPrompt`.
+ */
+function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
+  host.innerHTML = "";
+  host.className = "dynamic-ui-stage";
+
+  const p = (committedPrompt || "").trim();
+  if (!p) {
+    const empty = document.createElement("div");
+    empty.className = "dynamic-ui-placeholder";
+    empty.textContent = "Noch keine Vorschau — Prompt eingeben und „Erzeugen / neu erzeugen“ wählen.";
+    host.appendChild(empty);
+    return;
+  }
+
+  const low = p.toLowerCase();
+  let mode = "generic";
+  if (/balken|bar chart|balkendiagramm|column chart/i.test(low)) mode = "bars";
+  else if (/slider|schieberegler|\bregler\b/i.test(low)) mode = "sliders";
+  else if (/matrix|gitter|raster|checkbox/i.test(low)) mode = "matrix";
+  else if (/zeitachse|line chart|liniendiagramm|verlauf/i.test(low)) mode = "line";
+
+  const cap = document.createElement("div");
+  cap.className = "dynamic-ui-cap";
+  cap.textContent = `Mock (${mode}) — ${interactive && role === "input" ? "interaktiv" : "Demonstration"}`;
+  host.appendChild(cap);
+
+  const body = document.createElement("div");
+  body.className = "dynamic-ui-body";
+
+  if (mode === "bars") {
+    const bars = document.createElement("div");
+    bars.className = "dyn-mock-chart dyn-mock-chart-bars";
+    [68, 45, 92, 55].forEach((h, i) => {
+      const col = document.createElement("div");
+      col.className = "dyn-bar-col";
+      const fill = document.createElement("div");
+      fill.className = "dyn-bar-fill";
+      fill.style.height = `${h}%`;
+      fill.title = `Q${i + 1}`;
+      const lab = document.createElement("span");
+      lab.className = "dyn-bar-lab";
+      lab.textContent = `Q${i + 1}`;
+      col.appendChild(fill);
+      col.appendChild(lab);
+      bars.appendChild(col);
+    });
+    body.appendChild(bars);
+  } else if (mode === "sliders") {
+    const sliders = [
+      ["Parameter A", "40"],
+      ["Parameter B", "70"],
+      ["Parameter C", "55"],
+    ];
+    sliders.forEach(([lbl]) => {
+      const row = document.createElement("div");
+      row.className = "dyn-slide-row";
+      const lab = document.createElement("label");
+      lab.className = "dyn-slide-label";
+      lab.textContent = lbl;
+      const rng = document.createElement("input");
+      rng.type = "range";
+      rng.min = "0";
+      rng.max = "100";
+      rng.value = "44";
+      rng.disabled = !(interactive && role === "input");
+      rng.className = "dyn-slide-input";
+      const out = document.createElement("span");
+      out.className = "dyn-slide-val";
+      out.textContent = rng.value + "%";
+      if (!rng.disabled) {
+        rng.addEventListener("input", () => {
+          out.textContent = rng.value + "%";
+        });
+      }
+      row.appendChild(lab);
+      row.appendChild(rng);
+      row.appendChild(out);
+      body.appendChild(row);
+    });
+  } else if (mode === "matrix") {
+    const table = document.createElement("table");
+    table.className = "dyn-mock-matrix";
+    const thead = document.createElement("thead");
+    const hr = document.createElement("tr");
+    ["", "Kol. A", "Kol. B", "Kol. C"].forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tb = document.createElement("tbody");
+    ["Zeile 1", "Zeile 2", "Zeile 3"].forEach((rw) => {
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.textContent = rw;
+      tr.appendChild(th);
+      for (let c = 0; c < 3; c += 1) {
+        const td = document.createElement("td");
+        const cx = document.createElement("input");
+        cx.type = "checkbox";
+        cx.disabled = !interactive || role !== "input";
+        cx.checked = !!(c + rw.length) % 2;
+        td.appendChild(cx);
+        tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    body.appendChild(table);
+  } else if (mode === "line") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 280 120");
+    svg.className = "dyn-mock-line-svg";
+    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    poly.setAttribute("fill", "none");
+    poly.setAttribute("stroke", "#1a4f8a");
+    poly.setAttribute("stroke-width", "3");
+    poly.setAttribute("points", "10,90 70,55 140,72 210,38 268,62");
+    svg.appendChild(poly);
+    body.appendChild(svg);
+  } else {
+    const generic = document.createElement("div");
+    generic.className = "dyn-mock-generic";
+    const title = document.createElement("p");
+    title.className = "dyn-mock-generic-title";
+    title.textContent = "Freies UI‑Stub";
+    const blk = document.createElement("p");
+    blk.className = "dyn-mock-generic-body";
+    const clipped = p.length > 260 ? `${p.slice(0, 260)}…` : p;
+    blk.innerHTML =
+      `Keine speziellen Schlüsselwörter erkannt — später wandelt euer Modell das Prompt in echte Oberfläche um.<br/>` +
+      `<q>${escapeHtml(clipped)}</q>`;
+    generic.appendChild(title);
+    generic.appendChild(blk);
+    body.appendChild(generic);
+  }
+
+  host.appendChild(body);
+}
+
+function appendFormLiveControl(host, item, index, locked, readonlyMock) {
+  const rowWrap = document.createElement("div");
+  rowWrap.className = "composer-form-field";
+
+  const typ = item.typ;
+  const fid = `${item.id || "fld"}-${index}`;
+
+  if (typ === "button" || typ === "submit" || typ === "reset") {
+    const b = document.createElement("button");
+    b.type = typ === "submit" ? "submit" : typ === "reset" ? "reset" : "button";
+    b.className =
+      typ === "submit" ? "composer-form-el composer-form-submit" : "composer-form-el composer-form-btn";
+    b.textContent = item.label || (typ === "submit" ? "Absenden" : typ === "reset" ? "Zurücksetzen" : "Aktion");
+    b.disabled = locked;
+    rowWrap.appendChild(b);
+    host.appendChild(rowWrap);
+    return;
+  }
+
+  const lab = document.createElement("label");
+  lab.className = "composer-form-field-label";
+  lab.htmlFor = fid;
+  lab.textContent = item.label;
+
+  if (typ === "textarea") {
+    const ta = document.createElement("textarea");
+    ta.id = fid;
+    ta.className = "composer-form-el";
+    ta.rows = 3;
+    ta.disabled = locked;
+    if (readonlyMock) {
+      ta.value = String(mockFilledControlState(item, index));
+      ta.readOnly = true;
+    } else {
+      ta.placeholder = "(Eingabe)";
+      ta.value = "";
+    }
+    rowWrap.appendChild(lab);
+    rowWrap.appendChild(ta);
+    host.appendChild(rowWrap);
+    return;
+  }
+
+  if (typ === "radio") {
+    const opts = parseFormOptions(item.options);
+    const lg = document.createElement("fieldset");
+    lg.className = "composer-form-fs";
+    const cap = document.createElement("legend");
+    cap.textContent = item.label;
+    lg.appendChild(cap);
+    const mockPick = opts.length ? opts[Math.min(Math.max(index, 0), opts.length - 1)] : "";
+    opts.forEach((opt) => {
+      const rw = document.createElement("label");
+      rw.className = "composer-form-radio-line";
+      const rd = document.createElement("input");
+      rd.type = "radio";
+      rd.name = `rg-${item.id}-${index}`;
+      rd.value = opt;
+      rd.disabled = locked || readonlyMock;
+      if (readonlyMock) rd.checked = opt === mockPick;
+      rw.appendChild(rd);
+      rw.appendChild(document.createTextNode(" " + opt));
+      lg.appendChild(rw);
+    });
+    rowWrap.appendChild(lg);
+    host.appendChild(rowWrap);
+    return;
+  }
+
+  if (typ === "select") {
+    const opts = parseFormOptions(item.options);
+    rowWrap.className += " composer-form-field-stack";
+    const sel = document.createElement("select");
+    sel.id = fid;
+    sel.className = "composer-form-el";
+    sel.disabled = locked || readonlyMock;
+    opts.forEach((o) => {
+      const op = document.createElement("option");
+      op.value = o;
+      op.textContent = o;
+      sel.appendChild(op);
+    });
+    if (opts.length) {
+      sel.selectedIndex = readonlyMock ? Math.min(1, opts.length - 1) : 0;
+    }
+    rowWrap.appendChild(lab);
+    rowWrap.appendChild(sel);
+    host.appendChild(rowWrap);
+    return;
+  }
+
+  if (typ === "checkbox") {
+    const row = document.createElement("label");
+    row.className = "composer-form-check-line";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.id = fid;
+    cb.disabled = locked || readonlyMock;
+    if (readonlyMock) cb.checked = !!mockFilledControlState(item, index);
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(" " + item.label));
+    host.appendChild(row);
+    return;
+  }
+
+  const inp = document.createElement("input");
+  inp.className = "composer-form-el";
+  inp.id = fid;
+  inp.disabled = locked;
+  if (typ === "number") inp.type = "number";
+  else if (typ === "email") inp.type = "email";
+  else inp.type = "text";
+
+  if (readonlyMock) {
+    inp.value = String(mockFilledControlState(item, index));
+    inp.readOnly = true;
+  } else {
+    inp.placeholder = "…";
+  }
+
+  rowWrap.appendChild(lab);
+  rowWrap.appendChild(inp);
+  host.appendChild(rowWrap);
+}
+
+function renderFormComposerModule(block, card) {
+  if (!Array.isArray(block.formItems)) block.formItems = [];
+
+  const locked = state.running;
+  const isOutput = block.role === "output";
+
+  const body = document.createElement("div");
+  body.className = "composer-form-module";
+
+  const hint = document.createElement("p");
+  hint.className = "composer-form-lede field-hint";
+  hint.textContent = isOutput
+    ? "Identisch zum Input-Form — hier mit demonstrierter Modellbefüllung."
+    : "Felder zusammenbauen; unten zeigt sich die spätere Participant-Oberfläche.";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "composer-form-toolbar";
+
+  const typeSel = document.createElement("select");
+  typeSel.className = "composer-form-toolbar-type";
+  typeSel.disabled = locked;
+  FORM_BUILDER_FIELD_TYPES.forEach((o) => {
+    const op = document.createElement("option");
+    op.value = o.value;
+    op.textContent = o.label;
+    typeSel.appendChild(op);
+  });
+
+  const lblIn = document.createElement("input");
+  lblIn.type = "text";
+  lblIn.className = "composer-form-toolbar-label";
+  lblIn.placeholder = "Label (z. B. Name, Datenschutz, Anrede…)";
+  lblIn.disabled = locked;
+
+  const optIn = document.createElement("input");
+  optIn.type = "text";
+  optIn.className = "composer-form-toolbar-options";
+  optIn.placeholder = "Optionen (Radio/Liste): Herr, Frau, Divers …";
+  optIn.disabled = locked;
+  optIn.style.display = "none";
+
+  function refreshOptVisibility() {
+    optIn.style.display = needsFormExtraOptions(typeSel.value) ? "" : "none";
+  }
+  typeSel.addEventListener("change", refreshOptVisibility);
+  refreshOptVisibility();
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "composer-form-add";
+  addBtn.textContent = "Hinzufügen";
+  addBtn.disabled = locked;
+
+  addBtn.addEventListener("click", () => {
+    const typ = typeSel.value;
+    const labelTxt = lblIn.value.trim();
+    const trivialBtn = typ === "submit" || typ === "reset" || typ === "button";
+    if (!labelTxt && !trivialBtn) {
+      showToast("Bitte ein Label eintragen.");
+      return;
+    }
+    let opts = optIn.value.trim();
+    if (needsFormExtraOptions(typ)) {
+      if (!opts) {
+        showToast("Für Auswahl oder Radio sind Optionen nötig (kommagetrennt).");
+        return;
+      }
+    } else {
+      opts = "";
+    }
+    const btnDefault =
+      typ === "submit" ? "Absenden" : typ === "reset" ? "Zurücksetzen" : typ === "button" ? "Aktion" : "";
+    block.formItems.push({
+      id: `${block.id}_${uid().replace(/^b\-/, "")}`,
+      typ,
+      label: labelTxt || btnDefault,
+      options: opts,
+    });
+    lblIn.value = "";
+    optIn.value = "";
+    renderAll();
+  });
+
+  toolbar.appendChild(typeSel);
+  toolbar.appendChild(lblIn);
+  toolbar.appendChild(optIn);
+  toolbar.appendChild(addBtn);
+
+  const listTitle = document.createElement("div");
+  listTitle.className = "composer-form-subtitle";
+  listTitle.textContent = "Felderliste";
+
+  const list = document.createElement("div");
+  list.className = "composer-form-rows";
+  if (!block.formItems.length) {
+    const emptyRow = document.createElement("div");
+    emptyRow.className = "composer-form-empty-row";
+    emptyRow.textContent = "Noch keine Felder.";
+    list.appendChild(emptyRow);
+  } else {
+    block.formItems.forEach((it, idx) => {
+      const row = document.createElement("div");
+      row.className = "composer-form-defined-row";
+      const meta = FORM_BUILDER_FIELD_TYPES.find((f) => f.value === it.typ);
+      const cap = document.createElement("span");
+      cap.className = "composer-form-def-label";
+      cap.textContent = needsFormExtraOptions(it.typ)
+        ? `${it.label} · ${parseFormOptions(it.options).join(" / ") || "—"}`
+        : it.label;
+
+      const badge = document.createElement("span");
+      badge.className = "composer-form-kind";
+      badge.textContent = (meta && meta.label) || it.typ;
+
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "composer-form-remove";
+      rm.textContent = "✕";
+      rm.disabled = locked;
+      rm.setAttribute("aria-label", `Zeile ${idx + 1} entfernen`);
+      rm.addEventListener("click", () => {
+        block.formItems.splice(idx, 1);
+        renderAll();
+      });
+
+      row.appendChild(badge);
+      row.appendChild(cap);
+      row.appendChild(rm);
+      list.appendChild(row);
+    });
+  }
+
+  const prevTitle = document.createElement("div");
+  prevTitle.className = "composer-form-subtitle";
+  prevTitle.textContent = isOutput ? "Vorschau mit Demo-Befüllung" : "Live-Vorschau";
+
+  const prevHost = document.createElement("div");
+  prevHost.className = "composer-form-preview-shell";
+
+  if (!block.formItems.length) {
+    const emptyP = document.createElement("p");
+    emptyP.className = "composer-form-preview-empty";
+    emptyP.textContent = "(Hier erscheinen die zusammengeklickten Widgets)";
+    prevHost.appendChild(emptyP);
+  } else {
+    const formEl = document.createElement("form");
+    formEl.className = "composer-form-live";
+    formEl.noValidate = true;
+    formEl.addEventListener("submit", (e) => {
+      e.preventDefault();
+      showToast("Absenden nur Demo — kein Backend-Aufruf.");
+    });
+
+    block.formItems.forEach((it, i) =>
+      appendFormLiveControl(formEl, it, i, locked, isOutput)
+    );
+    prevHost.appendChild(formEl);
+  }
+
+  body.appendChild(hint);
+  body.appendChild(toolbar);
+  body.appendChild(listTitle);
+  body.appendChild(list);
+  body.appendChild(prevTitle);
+  body.appendChild(prevHost);
+
+  const footHint = document.createElement("p");
+  footHint.className = "field-hint";
+  footHint.textContent =
+    "Im echten Produkt wird die Liste als JSON/schema serialisiert; hier nur Gestaltungs- und Storytelling‑Helfer.";
+  body.appendChild(footHint);
+
+  card.appendChild(body);
+}
+
+function renderDynamicUiModule(block, card) {
+  if (block.dynamicUiCommitted === undefined || block.dynamicUiCommitted === null) block.dynamicUiCommitted = "";
+
+  const locked = state.running;
+  const interactive = block.role === "input";
+
+  const body = document.createElement("div");
+  body.className = "dynamic-ui-module";
+
+  const lbl = document.createElement("label");
+  lbl.className = "dynamic-ui-prompt-label";
+  lbl.textContent = "UI-Prompt bearbeiten";
+  const ta = document.createElement("textarea");
+  ta.className = "dynamic-ui-prompt-field";
+  ta.rows = 4;
+  ta.disabled = locked;
+  ta.placeholder =
+    block.role === "input"
+      ? "Beispiel: Matrix mit Checkboxen für Nutzen, Aufwand, Risiko pro Idee …"
+      : "Beispiel: Balkendiagramm mit vier Quartalswerten …";
+
+  ta.value = String(block.values.uiPrompt ?? "");
+  ta.addEventListener("input", () => {
+    block.values.uiPrompt = ta.value;
+  });
+
+  const btns = document.createElement("div");
+  btns.className = "dynamic-ui-actions";
+
+  const gen = document.createElement("button");
+  gen.type = "button";
+  gen.className = "dynamic-ui-generate";
+  gen.textContent = "Erzeugen / neu erzeugen";
+  gen.disabled = locked;
+  gen.addEventListener("click", () => {
+    const txt = String(block.values.uiPrompt || "").trim();
+    if (!txt) {
+      showToast("Prompt ist leer.");
+      return;
+    }
+    block.dynamicUiCommitted = txt;
+    renderAll();
+    showToast("Mock-Vorschau aktualisiert — Prompt weiter editierbar.");
+  });
+
+  btns.appendChild(gen);
+
+  const prevTitle = document.createElement("div");
+  prevTitle.className = "composer-form-subtitle";
+  prevTitle.textContent = "Gerenderte Oberfläche (Mock)";
+
+  const host = document.createElement("div");
+  renderDynamicUiPreview(host, block.dynamicUiCommitted, interactive, block.role);
+
+  body.appendChild(lbl);
+  body.appendChild(ta);
+  body.appendChild(btns);
+  body.appendChild(prevTitle);
+  body.appendChild(host);
+
+  card.appendChild(body);
+}
+
 function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);
   if (!def) return;
@@ -1536,6 +2176,19 @@ function renderModuleCard(block, container) {
     mapEl.className = "module-api-mapping";
     mapEl.innerHTML = `<span class="module-api-mapping-k">API note</span> ${escapeHtml(schema.apiMapping)}`;
     card.appendChild(mapEl);
+  }
+
+  if (block.typeId === "form") {
+    renderFormComposerModule(block, card);
+    appendRunPreviewRow(block, card);
+    container.appendChild(card);
+    return;
+  }
+  if (block.typeId === "dynamic-ui") {
+    renderDynamicUiModule(block, card);
+    appendRunPreviewRow(block, card);
+    container.appendChild(card);
+    return;
   }
 
   if (!schema || !schema.fields.length) {
@@ -1929,6 +2582,16 @@ function applyPreset(presetId, silent) {
         { role: "process", typeId: "skills" },
         { role: "output", typeId: "text" },
         { role: "output", typeId: "image" },
+      ],
+    },
+    "form-ui-demo": {
+      blocks: [
+        { role: "input", typeId: "form" },
+        { role: "input", typeId: "dynamic-ui" },
+        { role: "process", typeId: "instruction" },
+        { role: "output", typeId: "text" },
+        { role: "output", typeId: "form" },
+        { role: "output", typeId: "dynamic-ui" },
       ],
     },
   };
