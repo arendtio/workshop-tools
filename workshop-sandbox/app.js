@@ -30,6 +30,78 @@ const OUTPUT_TYPES = [
 
 const ROLE_LABEL = { input: "Input", process: "Process", output: "Output" };
 
+/** @type {Record<string, { detail: string, metric?: string }>} */
+const MOCK_STEP = {
+  "input:text": {
+    detail: "Read workshop buffer (mock): pasted prompt + inline notes.",
+    metric: "847 chars · UTF-8",
+  },
+  "input:image": {
+    detail: "Decoded still frame from mock upload path.",
+    metric: "1024×768 · sRGB · 2.1 MB",
+  },
+  "input:audio-rec": {
+    detail: "Loaded clip into memory ring (no disk I/O in mock).",
+    metric: "12.4 s · 44.1 kHz mono",
+  },
+  "input:audio-live": {
+    detail: "Subscribed to fake mic stream; chunking for downstream STT.",
+    metric: "320 ms frames · RMS −18 dBFS",
+  },
+  "input:video-live": {
+    detail: "Webcam path idle — emitting placeholder keyframes only.",
+    metric: "15 fps · 640×480 (mock)",
+  },
+  "input:video-rec": {
+    detail: "Indexed container; seek table built for random access.",
+    metric: "482 frames · H.264 · 24 fps",
+  },
+  "process:instruction": {
+    detail: "Merged system + user instructions; pinned safety block (mock).",
+    metric: "~1.2k tokens context",
+  },
+  "process:vector-db": {
+    detail: "ANN search over embedded workshop docs (simulated scores).",
+    metric: "3 hits · top 0.82",
+  },
+  "process:loop": {
+    detail: "Evaluator: condition not met — would schedule another pass.",
+    metric: "iteration 2 / 4 (cap)",
+  },
+  "process:tooling": {
+    detail: "Called external tool shim; latency injected for realism.",
+    metric: "POST /v1/mock-tool · 142 ms · 200",
+  },
+  "process:skills": {
+    detail: "Injected skill pack snippets into working context.",
+    metric: "4 files · ~12k tokens (mock)",
+  },
+  "output:text": {
+    detail: "Synthesized reply channel; streaming disabled in mock.",
+    metric: "412 tokens draft",
+  },
+  "output:image": {
+    detail: "Rasterized latent to PNG via fake decoder.",
+    metric: "512×512 · seed 9201",
+  },
+  "output:audio": {
+    detail: "Rendered speech waveform to buffer (no playback here).",
+    metric: "8.2 s · 24 kHz",
+  },
+  "output:audio-live": {
+    detail: "Opened live audio sink — would push PCM to speakers.",
+    metric: "chunked 20 ms",
+  },
+  "output:video": {
+    detail: "Muxed video track with overlays (mock timeline only).",
+    metric: "1080p · 30 fps · 12 s",
+  },
+  "output:video-live": {
+    detail: "Composite preview stream — encoder waiting on frames.",
+    metric: "WebRTC-like session (stub)",
+  },
+};
+
 const state = {
   /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string }[]} */
   blocks: [],
@@ -193,6 +265,137 @@ function showToast(message) {
   showToast._t = setTimeout(() => el.classList.remove("visible"), 3200);
 }
 
+function mockStepFor(block) {
+  const key = `${block.role}:${block.typeId}`;
+  return (
+    MOCK_STEP[key] || {
+      detail: "No specific mock copy for this pairing — placeholder activity only.",
+      metric: "stub",
+    }
+  );
+}
+
+function buildMockPreview(blocks) {
+  const lines = [];
+  const textOut = blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  const anyOut = blocks.some((b) => b.role === "output");
+
+  if (textOut.length) {
+    lines.push(
+      "[assistant · mock]\n\nHere is a fabricated reply that shows how a text output would land in the run panel. " +
+        "In a real run this would reflect your inputs, retrieval, and tools.\n\n" +
+        "- Summary: pipeline executed in simulated order.\n" +
+        "- Confidence: illustrative only (no model).\n" +
+        "- Next: wire edges between parts to drive real execution order."
+    );
+  } else if (anyOut) {
+    lines.push(
+      "[run preview · mock]\n\nThis sheet has non-text outputs only. A full runner would show waveforms, image tiles, or stream panes here."
+    );
+  } else {
+    lines.push(
+      "[run preview · mock]\n\nNo output modules on the sheet — add at least one output to see a richer preview stub."
+    );
+  }
+
+  lines.push("");
+  lines.push("— Fabricated telemetry —");
+  lines.push(`session: mock-${Math.random().toString(36).slice(2, 10)}`);
+  lines.push(`latency total: ${(180 + blocks.length * 95 + Math.floor(Math.random() * 120)).toFixed(0)} ms (fake)`);
+  return lines.join("\n");
+}
+
+let runAnimTimers = [];
+
+function clearRunAnimTimers() {
+  runAnimTimers.forEach((id) => clearTimeout(id));
+  runAnimTimers = [];
+}
+
+function setRunOpen(open) {
+  const overlay = document.getElementById("run-overlay");
+  overlay.hidden = !open;
+  overlay.setAttribute("aria-hidden", open ? "false" : "true");
+  document.body.classList.toggle("run-open", open);
+  if (open) {
+    document.getElementById("run-close").focus();
+  } else {
+    clearRunAnimTimers();
+    document.getElementById("btn-run-mock").focus();
+  }
+}
+
+function openRunModal() {
+  clearRunAnimTimers();
+  const blocks = state.blocks.slice();
+  const overlay = document.getElementById("run-overlay");
+  const lede = document.getElementById("run-panel-lede");
+  const summary = document.getElementById("run-summary");
+  const stepsRoot = document.getElementById("run-steps");
+  const preview = document.getElementById("run-preview");
+
+  const inputs = blocks.filter((b) => b.role === "input").length;
+  const proc = blocks.filter((b) => b.role === "process").length;
+  const outs = blocks.filter((b) => b.role === "output").length;
+
+  lede.textContent =
+    "Fabricated execution trace for each part on the sheet. Order follows placement; real wiring would reorder this.";
+  summary.textContent = `${blocks.length} part${blocks.length === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output · mock session`;
+
+  stepsRoot.innerHTML = "";
+  preview.textContent = buildMockPreview(blocks);
+
+  const statusEls = [];
+
+  blocks.forEach((block, idx) => {
+    const def = findDef(block.role, block.typeId);
+    if (!def) return;
+    const mock = mockStepFor(block);
+    const li = document.createElement("li");
+    li.className = "run-step";
+    const roleClass = block.role === "input" ? "in" : block.role === "process" ? "mid" : "out";
+    const roleShort = block.role === "input" ? "In" : block.role === "process" ? "Proc" : "Out";
+
+    li.innerHTML = `
+      <span class="run-step-num">${idx + 1}</span>
+      <div class="run-step-head">
+        <span class="run-step-role ${roleClass}">${escapeHtml(roleShort)}</span>
+        <span class="run-step-title">${escapeHtml(def.title)}</span>
+      </div>
+      <p class="run-step-detail">${escapeHtml(mock.detail)}${
+        mock.metric ? " · " + escapeHtml(mock.metric) : ""
+      }</p>
+      <div class="run-step-status pending" data-run-status>Pending</div>
+    `;
+    stepsRoot.appendChild(li);
+    statusEls.push(li.querySelector("[data-run-status]"));
+  });
+
+  setRunOpen(true);
+
+  let t = 120;
+  statusEls.forEach((el) => {
+    runAnimTimers.push(
+      setTimeout(() => {
+        el.textContent = "Running…";
+        el.className = "run-step-status running";
+      }, t)
+    );
+    t += 320;
+    runAnimTimers.push(
+      setTimeout(() => {
+        el.textContent = "Done (mock)";
+        el.className = "run-step-status done";
+      }, t)
+    );
+    t += 220;
+  });
+}
+
+function closeRunModal() {
+  setRunOpen(false);
+}
+
 function init() {
   renderPalette();
 
@@ -205,7 +408,18 @@ function init() {
       showToast("Sheet is empty — add parts before a real run would make sense.");
       return;
     }
-    showToast("Stub run: later this would execute the sheet. Still mock-only.");
+    openRunModal();
+  });
+
+  document.getElementById("run-close").addEventListener("click", closeRunModal);
+  document.getElementById("run-backdrop").addEventListener("click", closeRunModal);
+
+  document.addEventListener("keydown", (e) => {
+    const overlay = document.getElementById("run-overlay");
+    if (e.key === "Escape" && !overlay.hidden) {
+      e.preventDefault();
+      closeRunModal();
+    }
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {

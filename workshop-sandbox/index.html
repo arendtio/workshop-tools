@@ -69,10 +69,39 @@
     </main>
 
     <footer class="status-bar">
-      <span>Run is a stub for now — it only nudges the workshop conversation, no models.</span>
+      <span>Run opens a simulated execution view — no models or network; data is fabricated for each part.</span>
     </footer>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <div
+      class="run-overlay"
+      id="run-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="run-dialog-title"
+      aria-hidden="true"
+      hidden
+    >
+      <div class="run-backdrop" id="run-backdrop"></div>
+      <div class="run-panel">
+        <div class="run-panel-head">
+          <div class="run-panel-titles">
+            <h2 id="run-dialog-title">Simulated run</h2>
+            <p class="run-panel-lede" id="run-panel-lede"></p>
+          </div>
+          <button type="button" class="run-close" id="run-close" aria-label="Close run view">Close</button>
+        </div>
+        <div class="run-panel-body">
+          <div class="run-summary" id="run-summary"></div>
+          <ol class="run-steps" id="run-steps"></ol>
+          <section class="run-preview" aria-labelledby="run-preview-title">
+            <h3 id="run-preview-title">Mock combined output</h3>
+            <pre class="run-preview-box" id="run-preview"></pre>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <script src="app.js"></script>
   </body>
