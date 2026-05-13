@@ -17,6 +17,13 @@ const INPUT_TYPES = [
 const PROCESS_TYPES = [
   { id: "instruction", code: "INS", title: "Instruction", desc: "Natural-language task or prompt", live: false },
   { id: "vector-db", code: "RAG", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
+  {
+    id: "tooling",
+    code: "TLS",
+    title: "Tooling",
+    desc: "Read/write business data through a connector stub",
+    live: false,
+  },
   { id: "skills", code: "SKL", title: "Skills / context", desc: "Platform-hosted skill presets", live: false },
 ];
 
@@ -442,6 +449,57 @@ const FORM_SCHEMA = {
         label: "",
         type: "hint",
         hint: "Your backend ingests these into a vector store / file search; participants do not manage collection IDs.",
+      },
+    ],
+  },
+  "process:tooling": {
+    apiMapping:
+      "Maps to Responses / Chat function tools or bespoke connectors server-side — this card holds workshop selections only.",
+    defaults: {
+      accessMode: "read",
+      serviceConnector: "internal_rest",
+      dataDomain: "customers",
+    },
+    fields: [
+      {
+        key: "accessMode",
+        label: "Vorgang",
+        type: "select",
+        options: [
+          { value: "read", label: "Daten lesen" },
+          { value: "write", label: "Daten schreiben" },
+        ],
+      },
+      {
+        key: "serviceConnector",
+        label: "Service / Anbindung",
+        type: "select",
+        options: [
+          { value: "internal_rest", label: "Interne REST-API" },
+          { value: "sql_db", label: "Datenbank (SQL)" },
+          { value: "crm", label: "CRM-System" },
+          { value: "erp", label: "ERP / Auftragsystem" },
+          { value: "ecommerce", label: "E-Commerce / Shop-Plattform" },
+          { value: "custom_http", label: "Eigener HTTP-Dienst" },
+        ],
+      },
+      {
+        key: "dataDomain",
+        label: "Datenbereich",
+        type: "select",
+        options: [
+          { value: "customers", label: "Kundendaten" },
+          { value: "orders", label: "Auftragsdaten" },
+          { value: "shop", label: "Shop- & Produktdaten" },
+          { value: "inventory", label: "Lager / Bestand" },
+          { value: "other", label: "Sonstiges" },
+        ],
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Stub-Werte für den Workshop; die echte Implementierung übersetzt Lesen/Schreiben, Service und Datenbereich in konkrete Endpunkte oder Tools.",
       },
     ],
   },
@@ -1212,6 +1270,23 @@ function gatherConversationSnapshotForTextOutput() {
     systemParts.push({ label: "Knowledge files", body: doc });
   }
 
+  const toolBlock = blocks.find((b) => b.role === "process" && b.typeId === "tooling");
+  const toolingSchema = FORM_SCHEMA["process:tooling"];
+  if (toolBlock && toolingSchema) {
+    const optLabel = (fieldKey, value) => {
+      const fld = toolingSchema.fields.find((f) => f.key === fieldKey);
+      const o = fld && fld.options && fld.options.find((x) => x.value === value);
+      return o ? o.label : String(value || "");
+    };
+    const op = optLabel("accessMode", toolBlock.values.accessMode || "read");
+    const srv = optLabel("serviceConnector", toolBlock.values.serviceConnector || "");
+    const dom = optLabel("dataDomain", toolBlock.values.dataDomain || "");
+    systemParts.push({
+      label: "Tooling",
+      body: `${op} · ${srv} · ${dom}`,
+    });
+  }
+
   /** @type {ChatTurnPreview[]} */
   const userTurns = [];
   blocks
@@ -1841,6 +1916,7 @@ function applyPreset(presetId, silent) {
       blocks: [
         { role: "input", typeId: "audio-live" },
         { role: "process", typeId: "instruction" },
+        { role: "process", typeId: "tooling" },
         { role: "output", typeId: "text" },
         { role: "output", typeId: "audio-live" },
       ],
