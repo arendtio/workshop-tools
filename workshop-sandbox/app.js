@@ -24,18 +24,16 @@ const INPUT_TYPES = [
   },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streaming microphone", live: true },
-  { id: "video-live", code: "V·L", title: "Video (live)", desc: "Webcam / screen stream", live: true },
-  { id: "video-rec", code: "V·R", title: "Video (recorded)", desc: "File-based video", live: false },
 ];
 
 const PROCESS_TYPES = [
-  { id: "instruction", code: "INS", title: "Instruction", desc: "Natural-language task or prompt", live: false },
+  { id: "instruction", code: "INS", title: "Instruction", desc: "System instruction and run limits", live: false },
   { id: "vector-db", code: "RAG", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
   {
     id: "tooling",
     code: "TLS",
     title: "Tooling",
-    desc: "Read/write business data through a connector stub",
+    desc: "Read/write workshop data scope (stub)",
     live: false,
   },
   { id: "skills", code: "SKL", title: "Skills / context", desc: "Platform-hosted skill presets", live: false },
@@ -60,8 +58,6 @@ const OUTPUT_TYPES = [
   },
   { id: "audio", code: "AUD", title: "Audio", desc: "Speech or sound file", live: false },
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
-  { id: "video", code: "VID", title: "Video", desc: "Rendered or composed video", live: false },
-  { id: "video-live", code: "V·L", title: "Video (live)", desc: "Live composite or stream out", live: true },
 ];
 
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
@@ -89,6 +85,9 @@ const blockMediaStreams = new Map();
 /** @type {Map<string, { recorder: MediaRecorder, chunks: BlobPart[], statusEl: HTMLElement | null }>} */
 const blockMediaRecorders = new Map();
 
+/** Push-to-talk toggle: block id → mic “open” (mock UI only). */
+const audioLivePttToggleState = new Map();
+
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
  * Field objects: type is one of text, textarea, number, select, segmented, dropzone, hint,
@@ -101,7 +100,6 @@ const FORM_SCHEMA = {
       "Chat Completions / Responses — user text turns (`messages` / `input`). See Text generation guide.",
     defaults: {
       content: "Summarize the workshop goals in two bullet points.",
-      labelForModel: "Workshop participant",
     },
     fields: [
       {
@@ -110,12 +108,6 @@ const FORM_SCHEMA = {
         type: "textarea",
         rows: 4,
         placeholder: "Prompt or raw text content",
-      },
-      {
-        key: "labelForModel",
-        label: "Participant label (optional)",
-        type: "text",
-        placeholder: "Maps to optional `name` on chat messages — for logs only",
       },
       {
         key: "_hint",
@@ -131,7 +123,6 @@ const FORM_SCHEMA = {
     defaults: {
       imageSource: "file",
       imageUrl: "",
-      visionDetail: "auto",
       uploadStub: "",
     },
     fields: [
@@ -160,16 +151,6 @@ const FORM_SCHEMA = {
         showWhen: { key: "imageSource", is: "url" },
       },
       {
-        key: "visionDetail",
-        label: "Vision detail",
-        type: "select",
-        options: [
-          { value: "auto", label: "auto — let the API decide" },
-          { value: "low", label: "low — faster / cheaper" },
-          { value: "high", label: "high — finer detail" },
-        ],
-      },
-      {
         key: "_hint",
         label: "",
         type: "hint",
@@ -183,9 +164,6 @@ const FORM_SCHEMA = {
     defaults: {
       uploadStub: "",
       recordingStub: "",
-      transcriptionModel: "gpt-4o-transcribe",
-      language: "",
-      responseShape: "text",
     },
     fields: [
       {
@@ -201,33 +179,6 @@ const FORM_SCHEMA = {
         type: "audio_record",
       },
       {
-        key: "transcriptionModel",
-        label: "Transcription model",
-        type: "select",
-        options: [
-          { value: "gpt-4o-transcribe", label: "gpt-4o-transcribe" },
-          { value: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe" },
-          { value: "gpt-4o-transcribe-diarize", label: "gpt-4o-transcribe-diarize (speakers)" },
-          { value: "whisper-1", label: "whisper-1 (classic)" },
-        ],
-      },
-      {
-        key: "language",
-        label: "Language hint (optional)",
-        type: "text",
-        placeholder: "ISO code e.g. en, de — improves accuracy",
-      },
-      {
-        key: "responseShape",
-        label: "What participants see first",
-        type: "select",
-        options: [
-          { value: "text", label: "Plain transcript text" },
-          { value: "verbose_json", label: "Verbose JSON (timestamps, etc.)" },
-          { value: "diarized_json", label: "Diarized JSON (speakers)" },
-        ],
-      },
-      {
         key: "_hint",
         label: "",
         type: "hint",
@@ -237,44 +188,13 @@ const FORM_SCHEMA = {
   },
   "input:audio-live": {
     apiMapping:
-      "Realtime API — `/v1/realtime` voice-agent session (WebRTC/WebSocket). Models like `gpt-realtime-2`. Realtime + Voice agents guides.",
+      "Live microphone capture for the workshop. Session type, transport, and speech models are chosen in your backend from the overall pipeline setup.",
     defaults: {
-      sessionGoal: "voice_agent",
-      connection: "webrtc",
-      model: "gpt-realtime-2",
       device: "",
-      vadPreset: "server_vad",
+      turnTaking: "vad",
+      pttStyle: "hold",
     },
     fields: [
-      {
-        key: "sessionGoal",
-        label: "Session type",
-        type: "select",
-        options: [
-          { value: "voice_agent", label: "Voice agent — model replies with speech" },
-          { value: "transcription", label: "Live transcription — text deltas only" },
-          { value: "translation", label: "Live translation — dedicated translation session" },
-        ],
-      },
-      {
-        key: "connection",
-        label: "Transport",
-        type: "select",
-        options: [
-          { value: "webrtc", label: "WebRTC (browser / Agents SDK pattern)" },
-          { value: "websocket", label: "WebSocket (server-side audio)" },
-        ],
-      },
-      {
-        key: "model",
-        label: "Realtime model",
-        type: "select",
-        options: [
-          { value: "gpt-realtime-2", label: "gpt-realtime-2" },
-          { value: "gpt-realtime-mini", label: "gpt-realtime-mini (example)" },
-          { value: "gpt-realtime-whisper", label: "gpt-realtime-whisper (transcription)" },
-        ],
-      },
       {
         key: "device",
         label: "Microphone",
@@ -282,13 +202,23 @@ const FORM_SCHEMA = {
         kind: "audioinput",
       },
       {
-        key: "vadPreset",
+        key: "turnTaking",
         label: "Turn-taking",
-        type: "select",
+        type: "segmented",
         options: [
-          { value: "server_vad", label: "Server-side voice activity" },
-          { value: "push_to_talk", label: "Push-to-talk (UI responsibility)" },
+          { value: "vad", label: "Voice activity" },
+          { value: "ptt", label: "Push-to-talk" },
         ],
+      },
+      {
+        key: "pttStyle",
+        label: "Push-to-talk mode",
+        type: "segmented",
+        options: [
+          { value: "hold", label: "Hold button while speaking" },
+          { value: "toggle", label: "Press to start / press again to stop" },
+        ],
+        showWhen: { key: "turnTaking", is: "ptt" },
       },
       {
         key: "_hint",
@@ -298,119 +228,22 @@ const FORM_SCHEMA = {
       },
     ],
   },
-  "input:video-live": {
-    apiMapping:
-      "Sample frames → Chat `image_url` parts or future video inputs; live path mirrors Realtime/WebRTC capture patterns.",
-    defaults: { source: "webcam", facing: "user", resolution: "1280x720", cameraDevice: "" },
-    fields: [
-      {
-        key: "source",
-        label: "Capture",
-        type: "select",
-        options: [
-          { value: "webcam", label: "Webcam" },
-          { value: "screen", label: "Screen share" },
-        ],
-      },
-      {
-        key: "cameraDevice",
-        label: "Camera",
-        type: "media_device",
-        kind: "videoinput",
-        showWhen: { key: "source", is: "webcam" },
-      },
-      { key: "facing", label: "Camera facing", type: "select", options: [
-        { value: "user", label: "Front / selfie" },
-        { value: "environment", label: "Back / room" },
-      ], showWhen: { key: "source", is: "webcam" } },
-      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1280x720" },
-      {
-        key: "_live",
-        label: "Preview",
-        type: "camera_preview",
-        mode: "video",
-        facing: "user",
-        showWhen: { key: "source", is: "webcam" },
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Workshop: show preview here; backend samples frames to still-image model calls until native video input is wired.",
-      },
-    ],
-  },
-  "input:video-rec": {
-    apiMapping:
-      "No single “video understanding” upload in core API — extract key frames client-side or server-side, then use `image_url` / `input_image`.",
-    defaults: { uploadStub: "" },
-    fields: [
-      {
-        key: "uploadStub",
-        label: "Video file",
-        type: "dropzone",
-        accept: "video/*,.mp4,.webm,.mov,.mkv",
-        dropLabel: "Drop video or browse",
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Trim and prepare the clip before upload; the downstream pipeline samples frames as needed.",
-      },
-    ],
-  },
   "process:instruction": {
     apiMapping:
-      "POST `/v1/chat/completions` or `/v1/responses` — `messages`, `model`, `max_completion_tokens`, `reasoning_effort` (reasoning models), `modalities`, `tools`. Loop/retry is orchestrated in your app.",
+      "Workshop: system instruction and run limits only — model, tokens, modalities, streaming, and voices are fixed server-side or via output modules.",
     defaults: {
-      instructionRole: "system",
       system:
         "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options.",
-      user: "Explain how this pipeline would run end-to-end in one short paragraph.",
-      model: "gpt-4o",
       maxIterations: "4",
       stopWhen: "Answer includes a numbered list.",
-      maxCompletionTokens: "1024",
-      outputModalities: "text",
-      outputVoice: "alloy",
-      stream: "false",
     },
     fields: [
       {
-        key: "instructionRole",
-        label: "Instruction role",
-        type: "select",
-        options: [
-          { value: "system", label: "system — classic GPT instructions" },
-          { value: "developer", label: "developer — preferred on newer reasoning models" },
-        ],
-      },
-      {
         key: "system",
-        label: "System / developer text",
+        label: "System instruction",
         type: "textarea",
-        rows: 3,
-        placeholder: "Behavior, tone, constraints",
-      },
-      {
-        key: "user",
-        label: "User instructions",
-        type: "textarea",
-        rows: 3,
-        placeholder: "What to do with upstream inputs",
-      },
-      {
-        key: "model",
-        label: "Model",
-        type: "select",
-        options: [
-          { value: "gpt-4o", label: "gpt-4o (multimodal text+image+audio in)" },
-          { value: "gpt-4o-mini", label: "gpt-4o-mini" },
-          { value: "gpt-4.1", label: "gpt-4.1" },
-          { value: "gpt-5-mini", label: "gpt-5-mini (example)" },
-          { value: "gpt-4o-audio-preview", label: "gpt-4o-audio-preview (audio out)" },
-        ],
+        rows: 4,
+        placeholder: "Behavior, tone, constraints for this workshop step",
       },
       { key: "maxIterations", label: "Max iterations (agent / retry loop)", type: "number", placeholder: "4" },
       {
@@ -421,40 +254,10 @@ const FORM_SCHEMA = {
         placeholder: "When should the run stop retrying? (Your backend evaluates this.)",
       },
       {
-        key: "maxCompletionTokens",
-        label: "Max completion tokens",
-        type: "number",
-        placeholder: "Prefer `max_completion_tokens` over legacy `max_tokens`",
-      },
-      {
-        key: "outputModalities",
-        label: "Output modalities",
-        type: "select",
-        options: [
-          { value: "text", label: "text only" },
-          { value: "text,audio", label: "text + audio (audio-capable models)" },
-        ],
-      },
-      {
-        key: "outputVoice",
-        label: "Spoken voice (if audio out)",
-        type: "select",
-        options: OPENAI_VOICE_SELECT_OPTIONS,
-      },
-      {
-        key: "stream",
-        label: "Stream tokens",
-        type: "select",
-        options: [
-          { value: "false", label: "No" },
-          { value: "true", label: "Yes (`stream: true`)" },
-        ],
-      },
-      {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Reasoning models: tune `reasoning_effort` on the server. Temperature is omitted here — set per-model defaults in the backend if needed.",
+        hint: "Reasoning effort and sampling live on the server; outputs are shaped by your output modules.",
       },
     ],
   },
@@ -485,8 +288,7 @@ const FORM_SCHEMA = {
       "Maps to Responses / Chat function tools or bespoke connectors server-side — this card holds workshop selections only.",
     defaults: {
       accessMode: "read",
-      serviceConnector: "internal_rest",
-      dataDomain: "customers",
+      serviceDomain: "customers",
     },
     fields: [
       {
@@ -499,21 +301,8 @@ const FORM_SCHEMA = {
         ],
       },
       {
-        key: "serviceConnector",
-        label: "Service / Anbindung",
-        type: "select",
-        options: [
-          { value: "internal_rest", label: "Interne REST-API" },
-          { value: "sql_db", label: "Datenbank (SQL)" },
-          { value: "crm", label: "CRM-System" },
-          { value: "erp", label: "ERP / Auftragsystem" },
-          { value: "ecommerce", label: "E-Commerce / Shop-Plattform" },
-          { value: "custom_http", label: "Eigener HTTP-Dienst" },
-        ],
-      },
-      {
-        key: "dataDomain",
-        label: "Datenbereich",
+        key: "serviceDomain",
+        label: "Service",
         type: "select",
         options: [
           { value: "customers", label: "Kundendaten" },
@@ -527,7 +316,7 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Stub-Werte für den Workshop; die echte Implementierung übersetzt Lesen/Schreiben, Service und Datenbereich in konkrete Endpunkte oder Tools.",
+        hint: "Stub-Werte für den Workshop; die echte Implementierung übersetzt Vorgang und Service in konkrete Endpunkte oder Tools.",
       },
     ],
   },
@@ -586,78 +375,17 @@ const FORM_SCHEMA = {
   },
   "output:text": {
     apiMapping:
-      "Assistant `content` in Chat Completions, or `output_text` in Responses — shown here as a chat-style thread for the workshop.",
-    defaults: {
-      format: "markdown",
-      maxCompletionTokens: "1024",
-      stream: "false",
-    },
-    fields: [
-      {
-        key: "format",
-        label: "Presentation",
-        type: "select",
-        options: [
-          { value: "markdown", label: "Markdown" },
-          { value: "plain", label: "Plain text" },
-          { value: "json_schema", label: "Structured JSON (server)" },
-        ],
-      },
-      {
-        key: "maxCompletionTokens",
-        label: "Max output tokens",
-        type: "number",
-        placeholder: "1024",
-      },
-      {
-        key: "stream",
-        label: "Stream to UI",
-        type: "select",
-        options: [
-          { value: "false", label: "No" },
-          { value: "true", label: "Yes" },
-        ],
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Thread above reflects the current pipeline (mock). Connect a backend to thread real messages.",
-      },
-    ],
+      "Assistant reply in your host app — this card is a compact chat preview of upstream pipeline context (mock).",
+    defaults: {},
+    fields: [],
   },
   "output:image": {
     apiMapping:
-      "POST `/v1/images/generations` — `model` (`gpt-image-1.5`, `dall-e-3`, …), `prompt`, `size`, `quality`, `n`, `output_format`, `background`.",
+      "POST `/v1/images/generations` — size and other parameters are chosen server-side; this block keeps workshop framing only.",
     defaults: {
-      prompt: "Flat vector illustration of a team workshop at a whiteboard, soft daylight.",
-      model: "gpt-image-1.5",
       size: "1024x1024",
-      quality: "medium",
-      n: "1",
-      outputFormat: "png",
-      background: "auto",
     },
     fields: [
-      {
-        key: "prompt",
-        label: "Image prompt",
-        type: "textarea",
-        rows: 3,
-        placeholder: "Describe the scene, style, constraints",
-      },
-      {
-        key: "model",
-        label: "Model",
-        type: "select",
-        options: [
-          { value: "gpt-image-1.5", label: "gpt-image-1.5" },
-          { value: "gpt-image-1", label: "gpt-image-1" },
-          { value: "gpt-image-1-mini", label: "gpt-image-1-mini" },
-          { value: "dall-e-3", label: "dall-e-3" },
-          { value: "dall-e-2", label: "dall-e-2" },
-        ],
-      },
       {
         key: "size",
         label: "Size",
@@ -669,107 +397,20 @@ const FORM_SCHEMA = {
           { value: "auto", label: "auto (supported models)" },
         ],
       },
-      {
-        key: "quality",
-        label: "Quality",
-        type: "select",
-        options: [
-          { value: "auto", label: "auto" },
-          { value: "low", label: "low" },
-          { value: "medium", label: "medium" },
-          { value: "high", label: "high" },
-          { value: "hd", label: "hd (DALL·E 3)" },
-          { value: "standard", label: "standard (DALL·E 3)" },
-        ],
-      },
-      { key: "n", label: "Number of images", type: "number", placeholder: "1–10 (DALL·E 3 allows 1)" },
-      {
-        key: "outputFormat",
-        label: "File format (GPT image models)",
-        type: "select",
-        options: [
-          { value: "png", label: "png" },
-          { value: "jpeg", label: "jpeg" },
-          { value: "webp", label: "webp" },
-        ],
-      },
-      {
-        key: "background",
-        label: "Background",
-        type: "select",
-        options: [
-          { value: "auto", label: "auto" },
-          { value: "opaque", label: "opaque" },
-          { value: "transparent", label: "transparent (png/webp)" },
-        ],
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "GPT image models return base64 by default; DALL·E 2/3 can return temporary URLs (`response_format`).",
-      },
     ],
   },
   "output:audio": {
     apiMapping:
-      "POST `/v1/audio/speech` — `model` (`gpt-4o-mini-tts`, `tts-1`, …), `input` text, `voice`, `instructions` (mini TTS), `speed`, `response_format`, `stream_format`.",
+      "POST `/v1/audio/speech` — workshop picks voice only; model, speed, format, and copy come from processing / backend.",
     defaults: {
-      speechInput: "Welcome to the workshop! Here is a quick audio summary of the agenda.",
-      model: "gpt-4o-mini-tts",
       voice: "alloy",
-      speed: "1.0",
-      responseFormat: "mp3",
-      voiceInstructions: "Speak warmly and slightly slowly for a live room.",
     },
     fields: [
-      {
-        key: "speechInput",
-        label: "Text to speak",
-        type: "textarea",
-        rows: 3,
-        placeholder: "Up to ~4k characters for the speech endpoint",
-      },
-      {
-        key: "model",
-        label: "TTS model",
-        type: "select",
-        options: [
-          { value: "gpt-4o-mini-tts", label: "gpt-4o-mini-tts (style instructions)" },
-          { value: "tts-1-hd", label: "tts-1-hd" },
-          { value: "tts-1", label: "tts-1" },
-        ],
-      },
       {
         key: "voice",
         label: "Voice",
         type: "select",
         options: OPENAI_VOICE_SELECT_OPTIONS,
-      },
-      { key: "speed", label: "Speed (0.25–4.0)", type: "text", placeholder: "1.0" },
-      {
-        key: "responseFormat",
-        label: "Audio format",
-        type: "select",
-        options: [
-          { value: "mp3", label: "mp3" },
-          { value: "wav", label: "wav" },
-          { value: "aac", label: "aac" },
-          { value: "opus", label: "opus" },
-        ],
-      },
-      {
-        key: "voiceInstructions",
-        label: "Delivery instructions (mini TTS only)",
-        type: "textarea",
-        rows: 2,
-        placeholder: "Ignored for tts-1 / tts-1-hd",
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Streaming playback: `stream_format` supports `sse` or `audio` on newer models — workshop UIs can progressively play chunks.",
       },
     ],
   },
@@ -785,43 +426,6 @@ const FORM_SCHEMA = {
         label: "Voice",
         type: "select",
         options: OPENAI_VOICE_SELECT_OPTIONS,
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "How audio is delivered is chosen in your app layer; participants only pick the voice character here.",
-      },
-    ],
-  },
-  "output:video": {
-    apiMapping:
-      "OpenAI’s core API reference does **not** include end-to-end text-to-video generation. These notes are **only participant intent** — implement with offline tools, vendors, or your own stacks.",
-    defaults: { resolution: "1920x1080", fps: "30", durationSec: "12" },
-    fields: [
-      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1920x1080" },
-      { key: "fps", label: "Frame rate", type: "number", placeholder: "30" },
-      { key: "durationSec", label: "Duration (sec)", type: "number", placeholder: "12" },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "No `/v1/…/video` generator in the OpenAI reference — this block is for planning only.",
-      },
-    ],
-  },
-  "output:video-live": {
-    apiMapping:
-      "OpenAI does not expose a dedicated “live video compositor” HTTP API. Output target resolution is a **product** choice for your player or encoder.",
-    defaults: { resolution: "1920x1080", fps: "30" },
-    fields: [
-      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1920x1080" },
-      { key: "fps", label: "Target frame rate", type: "number", placeholder: "30" },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Layout, codecs, and mixing are implementation details outside the OpenAI API surface.",
       },
     ],
   },
@@ -901,7 +505,12 @@ function stopBlockCapture(blockId) {
   stopBlockRecorder(blockId);
 }
 
+function findBlock(role, typeId) {
+  return state.blocks.find((b) => b.role === role && b.typeId === typeId);
+}
+
 function addBlock(role, typeId) {
+  if (findBlock(role, typeId)) return;
   state.blocks.push(createBlock(role, typeId));
   renderAll();
 }
@@ -927,7 +536,15 @@ function fillPalette(containerId, types, role) {
     btn.className = "part";
     btn.title = t.desc;
     btn.innerHTML = `<span class="pi" aria-hidden="true">${escapeHtml(t.code)}</span><span>${escapeHtml(t.title)}</span>`;
-    btn.addEventListener("click", () => addBlock(role, t.id));
+    const existing = findBlock(role, t.id);
+    btn.classList.toggle("part-active", !!existing);
+    btn.setAttribute("aria-pressed", existing ? "true" : "false");
+    btn.addEventListener("click", () => {
+      if (state.running) return;
+      const hit = findBlock(role, t.id);
+      if (hit) removeBlock(hit.id);
+      else addBlock(role, t.id);
+    });
     el.appendChild(btn);
   });
 }
@@ -1030,8 +647,10 @@ function renderSegmentedField(field, block, disabled, wrap) {
     b.className = "segmented-opt" + (String(block.values[field.key]) === opt.value ? " is-active" : "");
     b.textContent = opt.label;
     b.disabled = disabled;
-    b.addEventListener("click", () => {
+    b.addEventListener("click", (e) => {
       if (disabled) return;
+      e.preventDefault();
+      e.stopPropagation();
       block.values[field.key] = opt.value;
       renderAll();
     });
@@ -1243,14 +862,10 @@ function renderCameraPreviewField(field, block, disabled, wrap) {
     if (disabled) return;
     stopBlockMedia(block.id);
     img.hidden = true;
-    const facingMode =
-      block.values.facing === "environment" ? "environment" : field.facing === "environment" ? "environment" : "user";
     try {
       const vdev = mode === "video" ? block.values.cameraDevice : "";
       const videoConstraint =
-        mode === "video" && vdev
-          ? { deviceId: { exact: vdev } }
-          : { facingMode: facingMode };
+        mode === "video" && vdev ? { deviceId: { exact: vdev } } : { facingMode: "user" };
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraint,
         audio: false,
@@ -1295,7 +910,7 @@ function renderCameraPreviewField(field, block, disabled, wrap) {
 
 /** @typedef {{ label: string, body: string, empty?: boolean }} ChatTurnPreview */
 
-/** @typedef {{ systemParts: { label: string, body: string }[], userTurns: ChatTurnPreview[], instructions: string }} ConversationSnapshot */
+/** @typedef {{ systemParts: { label: string, body: string }[], userTurns: ChatTurnPreview[] }} ConversationSnapshot */
 
 /**
  * Builds a lightweight view of upstream inputs & instructions for the text output card.
@@ -1310,10 +925,17 @@ function gatherConversationSnapshotForTextOutput() {
   const sk = FORM_SCHEMA["process:skills"];
 
   if (inst) {
-    const roleLab = String(inst.values.instructionRole || "system") === "developer" ? "Developer" : "System";
     const sysTxt = String(inst.values.system || "").trim();
     if (sysTxt) {
-      systemParts.push({ label: roleLab, body: sysTxt });
+      systemParts.push({ label: "System", body: sysTxt });
+    }
+    const mi = String(inst.values.maxIterations || "").trim();
+    const sw = String(inst.values.stopWhen || "").trim();
+    if (mi || sw) {
+      const parts = [];
+      if (mi) parts.push(`Max iterations: ${mi}`);
+      if (sw) parts.push(`Stop when: ${sw}`);
+      systemParts.push({ label: "Run orchestration", body: parts.join("\n") });
     }
   }
 
@@ -1343,11 +965,10 @@ function gatherConversationSnapshotForTextOutput() {
       return o ? o.label : String(value || "");
     };
     const op = optLabel("accessMode", toolBlock.values.accessMode || "read");
-    const srv = optLabel("serviceConnector", toolBlock.values.serviceConnector || "");
-    const dom = optLabel("dataDomain", toolBlock.values.dataDomain || "");
+    const dom = optLabel("serviceDomain", toolBlock.values.serviceDomain || "");
     systemParts.push({
       label: "Tooling",
-      body: `${op} · ${srv} · ${dom}`,
+      body: `${op} · ${dom}`,
     });
   }
 
@@ -1405,18 +1026,24 @@ function gatherConversationSnapshotForTextOutput() {
       }
     });
 
-  const instructions =
-    inst && String(inst.values.user || "").trim() ? String(inst.values.user).trim() : "";
-
-  return { systemParts, userTurns, instructions };
+  return { systemParts, userTurns };
 }
 
-function appendChatBubble(roleClass, roleLabel, bodyText) {
+function chatTagAbbrev(label) {
+  const s = String(label || "").trim();
+  if (!s) return "·";
+  const u = s.toUpperCase();
+  if (u.length <= 4) return u;
+  return `${u.slice(0, 3)}…`;
+}
+
+function appendChatBubble(roleClass, tagText, tagTitle, bodyText) {
   const row = document.createElement("div");
   row.className = "output-chat-row output-chat-row-" + roleClass;
   const tag = document.createElement("span");
   tag.className = "output-chat-role";
-  tag.textContent = roleLabel;
+  tag.textContent = tagText;
+  tag.title = tagTitle;
   const bubble = document.createElement("div");
   bubble.className = "output-chat-bubble";
   const pre = document.createElement("pre");
@@ -1431,42 +1058,35 @@ function appendChatBubble(roleClass, roleLabel, bodyText) {
 function renderOutputTextConversationPreview(block, card) {
   const snap = gatherConversationSnapshotForTextOutput();
   const thread = document.createElement("div");
-  thread.className = "output-chat-thread";
+  thread.className = "output-chat-thread output-chat-thread--compact";
 
   const lead = document.createElement("div");
   lead.className = "output-chat-lede";
-  lead.textContent = "How the reply is framed — derived from pipeline inputs (preview only)";
+  lead.textContent = "Chat preview (mock)";
   thread.appendChild(lead);
 
   if (!snap.systemParts.length) {
-    thread.appendChild(appendChatBubble("system", "System", "(no system / developer instructions yet)"));
+    thread.appendChild(appendChatBubble("system", "—", "System", "(no system instructions yet)"));
   } else {
     snap.systemParts.forEach((part) => {
-      thread.appendChild(appendChatBubble("system", part.label, part.body));
+      thread.appendChild(appendChatBubble("system", chatTagAbbrev(part.label), part.label, part.body));
     });
   }
 
   if (!snap.userTurns.length) {
-    thread.appendChild(appendChatBubble("user", "User inputs", "(add input modules)"));
+    thread.appendChild(appendChatBubble("user", "—", "User inputs", "(add input modules)"));
   } else {
     snap.userTurns.forEach((row) => {
-      thread.appendChild(appendChatBubble("user", row.label, row.body));
+      thread.appendChild(appendChatBubble("user", chatTagAbbrev(row.label), row.label, row.body));
     });
   }
-
-  thread.appendChild(
-    appendChatBubble(
-      "instruction",
-      "Task / instructions",
-      snap.instructions || "(no Instruction module user prompt — empty)"
-    )
-  );
 
   const asstRow = document.createElement("div");
   asstRow.className = "output-chat-row output-chat-row-assistant";
   const tag = document.createElement("span");
   tag.className = "output-chat-role";
-  tag.textContent = "Assistant · output";
+  tag.textContent = "OUT";
+  tag.title = "Assistant reply";
   const bubble = document.createElement("div");
   bubble.className = "output-chat-bubble output-chat-bubble-assistant";
 
@@ -1474,7 +1094,7 @@ function renderOutputTextConversationPreview(block, card) {
   ta.className = "run-preview-inline output-chat-assistant-ta";
   ta.readOnly = true;
   ta.setAttribute("data-run-preview-block", block.id);
-  ta.rows = 6;
+  ta.rows = 5;
   ta.placeholder = "Run the pipeline to simulate a reply here.";
   ta.value = block.runPreview || "";
   bubble.appendChild(ta);
@@ -1488,6 +1108,7 @@ function renderOutputTextConversationPreview(block, card) {
 
 function renderOutputTextModule(block, card, schema) {
   renderOutputTextConversationPreview(block, card);
+  if (!schema.fields.length) return;
 
   const form = document.createElement("div");
   form.className = "module-card-fields output-text-settings";
@@ -2140,6 +1761,80 @@ function renderDynamicUiModule(block, card) {
   card.appendChild(body);
 }
 
+/**
+ * Mock push-to-talk: control stays disabled until a pipeline run is active.
+ */
+function renderAudioLivePttBar(block, card) {
+  const wrap = document.createElement("div");
+  wrap.className = "ptt-live-bar";
+
+  const title = document.createElement("div");
+  title.className = "ptt-live-title";
+  title.textContent = "Push-to-talk";
+
+  const hint = document.createElement("p");
+  hint.className = "field-hint ptt-live-hint";
+
+  const running = state.running;
+  const isHold = block.values.pttStyle !== "toggle";
+
+  if (!running) {
+    hint.textContent = isHold
+      ? "Start a run to use the button. Then hold it while you speak (mock — no audio is sent)."
+      : "Start a run to use the button. Then press to open the mic and press again to close (mock — no audio is sent).";
+  } else {
+    hint.textContent = isHold
+      ? "Hold while speaking. Release to stop (mock)."
+      : "Press once to open the mic, press again to close (mock).";
+  }
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ptt-live-btn";
+  btn.disabled = !running;
+
+  if (isHold) {
+    btn.textContent = "Hold to speak";
+    if (running) {
+      const release = () => {
+        btn.classList.remove("is-transmitting");
+      };
+      btn.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || btn.disabled) return;
+        e.preventDefault();
+        try {
+          btn.setPointerCapture(e.pointerId);
+        } catch (_) {
+          /* ignore */
+        }
+        btn.classList.add("is-transmitting");
+      });
+      btn.addEventListener("pointerup", release);
+      btn.addEventListener("pointercancel", release);
+      btn.addEventListener("lostpointercapture", release);
+    }
+  } else {
+    const syncToggleUi = () => {
+      const on = audioLivePttToggleState.get(block.id) === true;
+      btn.textContent = on ? "Stop speaking" : "Start speaking";
+      btn.classList.toggle("is-transmitting", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    };
+    syncToggleUi();
+    if (running) {
+      btn.addEventListener("click", () => {
+        audioLivePttToggleState.set(block.id, !audioLivePttToggleState.get(block.id));
+        syncToggleUi();
+      });
+    }
+  }
+
+  wrap.appendChild(title);
+  wrap.appendChild(hint);
+  wrap.appendChild(btn);
+  card.appendChild(wrap);
+}
+
 function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);
   if (!def) return;
@@ -2180,13 +1875,17 @@ function renderModuleCard(block, container) {
 
   if (block.typeId === "form") {
     renderFormComposerModule(block, card);
-    appendRunPreviewRow(block, card);
     container.appendChild(card);
     return;
   }
   if (block.typeId === "dynamic-ui") {
     renderDynamicUiModule(block, card);
-    appendRunPreviewRow(block, card);
+    container.appendChild(card);
+    return;
+  }
+
+  if (block.role === "output" && block.typeId === "text" && schema) {
+    renderOutputTextModule(block, card, schema);
     container.appendChild(card);
     return;
   }
@@ -2196,13 +1895,6 @@ function renderModuleCard(block, container) {
     p.className = "module-card-fallback";
     p.textContent = "No fields for this type (mock).";
     card.appendChild(p);
-    appendRunPreviewRow(block, card);
-    container.appendChild(card);
-    return;
-  }
-
-  if (block.role === "output" && block.typeId === "text") {
-    renderOutputTextModule(block, card, schema);
     container.appendChild(card);
     return;
   }
@@ -2282,9 +1974,6 @@ function renderModuleCard(block, container) {
       }
       sel.addEventListener("change", () => {
         block.values[field.key] = sel.value;
-        if (field.key === "source" && block.role === "input" && block.typeId === "video-live") {
-          renderAll();
-        }
         if (field.key === "size" && block.role === "output" && block.typeId === "image") {
           renderAll();
         }
@@ -2322,10 +2011,12 @@ function renderModuleCard(block, container) {
   });
 
   card.appendChild(form);
+  if (block.role === "input" && block.typeId === "audio-live" && block.values.turnTaking === "ptt") {
+    renderAudioLivePttBar(block, card);
+  }
   if (block.role === "output" && block.typeId === "image") {
     appendImageOutputPlaceholder(block, card);
   }
-  appendRunPreviewRow(block, card);
   container.appendChild(card);
 }
 
@@ -2339,31 +2030,6 @@ function sendInputsBatch() {
   if (state.running) {
     applyRunTick();
   }
-}
-
-function appendRunPreviewRow(block, card) {
-  if (block.role !== "output") return;
-  if (block.typeId === "text") return;
-
-  const wrap = document.createElement("div");
-  wrap.className = "field field-compact field-run-preview";
-  const lab = document.createElement("label");
-  lab.textContent =
-    block.typeId === "text" ? "Last run (mock)" : "Last run note (mock)";
-  wrap.appendChild(lab);
-
-  const ta = document.createElement("textarea");
-  ta.className = "run-preview-inline";
-  ta.readOnly = true;
-  ta.setAttribute("data-run-preview-block", block.id);
-  ta.rows = block.typeId === "text" ? 5 : 2;
-  ta.placeholder =
-    block.typeId === "text"
-      ? "Run the pipeline to show a fabricated reply here."
-      : "Run to refresh mock asset / stream summary.";
-  ta.value = block.runPreview || "";
-  wrap.appendChild(ta);
-  card.appendChild(wrap);
 }
 
 function renderEditorSection(role, list, root) {
@@ -2456,16 +2122,11 @@ function injectRunPreviewIntoOutputs(previewText) {
     });
     return;
   }
-  state.blocks
-    .filter((b) => b.role === "output")
-    .forEach((b) => {
-      b.runPreview = "[mock] Non-text output — summary appears in Last run while the loop is active.";
-    });
 }
 
 function syncOutputPreviewFieldsFromState() {
   state.blocks
-    .filter((b) => b.role === "output")
+    .filter((b) => b.role === "output" && b.typeId === "text")
     .forEach((b) => {
       const el = document.querySelector(`textarea[data-run-preview-block="${b.id}"]`);
       if (el) el.value = b.runPreview || "";
@@ -2480,9 +2141,12 @@ function updateRunChrome() {
   const busy = fab.querySelector(".fab-run-icon-busy");
   const running = state.running;
   fab.classList.toggle("is-running", running);
-  if (label) label.textContent = running ? "Stop" : "Run";
+  if (label) label.textContent = running ? "Running" : "Run";
   fab.setAttribute("aria-pressed", running ? "true" : "false");
-  fab.setAttribute("aria-label", running ? "Stop mock pipeline run" : "Start mock pipeline run");
+  fab.setAttribute(
+    "aria-label",
+    running ? "Mock pipeline is running — click to stop" : "Start mock pipeline run",
+  );
   if (play) {
     play.style.display = running ? "none" : "";
     play.hidden = running;
@@ -2495,7 +2159,7 @@ function updateRunChrome() {
   const st = document.getElementById("status-bar-text");
   if (st) {
     st.textContent = running
-      ? "Mock run active — edit fields in place; library locked. Press Stop or Esc to end."
+      ? "Mock run active — edit fields in place; library locked. Click Running or Esc to end."
       : "Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.";
   }
 }
@@ -2515,6 +2179,7 @@ function applyRunTick() {
 function startMockRun() {
   if (state.running || !state.blocks.length) return;
   state.blocks.forEach((b) => stopBlockCapture(b.id));
+  audioLivePttToggleState.clear();
   state.running = true;
   updateRunChrome();
   lockPalette(true);
@@ -2526,6 +2191,7 @@ function startMockRun() {
 function stopMockRun() {
   if (!state.running) return;
   state.running = false;
+  audioLivePttToggleState.clear();
   if (mockRunInterval) {
     clearInterval(mockRunInterval);
     mockRunInterval = null;
@@ -2541,6 +2207,7 @@ function renderAll() {
     stopMockRun();
   }
   renderMeta();
+  renderPalette();
   renderModuleEditor();
 }
 
@@ -2577,7 +2244,7 @@ function applyPreset(presetId, silent) {
     "multimodal-out": {
       blocks: [
         { role: "input", typeId: "text" },
-        { role: "input", typeId: "video-rec" },
+        { role: "input", typeId: "image" },
         { role: "process", typeId: "instruction" },
         { role: "process", typeId: "skills" },
         { role: "output", typeId: "text" },
@@ -2628,7 +2295,7 @@ function buildMockPreview(blocks) {
     : "";
 
   const instr = blocks.find((b) => b.role === "process" && b.typeId === "instruction");
-  const userInstr = instr ? String(instr.values.user || "").trim().slice(0, 160) : "";
+  const sysBrief = instr ? String(instr.values.system || "").trim().slice(0, 160) : "";
 
   if (textOut) {
     lines.push("[assistant · mock]");
@@ -2638,9 +2305,9 @@ function buildMockPreview(blocks) {
       lines.push(snippet + (String(textIn[0].values.content || "").length > 220 ? "…" : ""));
       lines.push("");
     }
-    if (userInstr) {
-      lines.push("Task (instruction module, excerpt):");
-      lines.push(userInstr + (String(instr.values.user || "").length > 160 ? "…" : ""));
+    if (sysBrief) {
+      lines.push("System instruction (excerpt):");
+      lines.push(sysBrief + (String(instr.values.system || "").length > 160 ? "…" : ""));
       lines.push("");
     }
     if (instr) {
@@ -2678,8 +2345,6 @@ function buildMockPreview(blocks) {
 }
 
 function init() {
-  renderPalette();
-
   document.querySelectorAll("[data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => applyPreset(btn.getAttribute("data-preset"), false));
   });

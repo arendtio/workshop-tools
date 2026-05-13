@@ -27,8 +27,7 @@
       <aside class="palette" id="palette" aria-label="Block palette">
         <h2 class="palette-title">Module library</h2>
         <p class="palette-lede" id="palette-lede">
-          Click a part to append it to the pipeline. Each card includes workshop-oriented fields and an API note mapped to the
-          current OpenAI platform docs (still no backend). While running, the library is locked — edit existing fields freely.
+          Each module can appear at most once in the pipeline. Tap a part to add it; tap again (while not running) to remove it. While running, the library is locked — edit existing fields freely.
         </p>
 
         <div class="palette-group">
@@ -84,9 +83,13 @@
         </svg>
       </span>
       <span class="fab-run-icon fab-run-icon-busy" aria-hidden="true" hidden>
-        <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <circle class="fab-spinner-track" cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.35" />
-          <circle class="fab-spinner-head" cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="14 42" />
+        <svg class="fab-rotor-svg" width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <g class="fab-rotor-blades" fill="currentColor">
+            <rect x="10.75" y="4" width="2.5" height="8" rx="1.25" />
+            <rect x="10.75" y="4" width="2.5" height="8" rx="1.25" transform="rotate(120 12 12)" />
+            <rect x="10.75" y="4" width="2.5" height="8" rx="1.25" transform="rotate(240 12 12)" />
+            <circle cx="12" cy="12" r="2.35" opacity="0.98" />
+          </g>
         </svg>
       </span>
       <span class="fab-run-label" id="fab-run-label">Run</span>
