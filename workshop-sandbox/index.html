@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Workshop Sandbox — Workbench mock-up</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand">
+          <h1>AI Workshop Sandbox</h1>
+          <p>A desk to wire pieces together, then run — UI mock-up only.</p>
+        </div>
+        <div class="badges">
+          <span class="badge mock">Mock-up</span>
+          <span class="badge">No backend</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="ghost" id="btn-clear">Clear sheet</button>
+        <button type="button" class="run" id="btn-run-mock">Run</button>
+      </div>
+    </header>
+
+    <main class="work-shell">
+      <aside class="palette" aria-label="Block palette">
+        <h2 class="palette-title">Module library</h2>
+        <p class="palette-lede">Add modules to the sheet; remove with ×. Wiring and execution order are defined later.</p>
+
+        <div class="palette-group">
+          <h3 class="palette-group-title">Inputs</h3>
+          <div class="palette-buttons" id="palette-inputs"></div>
+        </div>
+        <div class="palette-group">
+          <h3 class="palette-group-title">Processing</h3>
+          <div class="palette-buttons" id="palette-process"></div>
+        </div>
+        <div class="palette-group">
+          <h3 class="palette-group-title">Outputs</h3>
+          <div class="palette-buttons" id="palette-output"></div>
+        </div>
+
+        <section class="examples" aria-labelledby="examples-title">
+          <h3 id="examples-title">Example layouts</h3>
+          <p class="examples-hint">Load a starter configuration; edit freely.</p>
+          <div class="examples-row">
+            <button type="button" class="chip" data-preset="text-prompt">Text pipeline</button>
+            <button type="button" class="chip" data-preset="vision">Vision + text</button>
+            <button type="button" class="chip" data-preset="live-audio">Live audio</button>
+            <button type="button" class="chip" data-preset="multimodal-out">Multimodal output</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workbench" aria-labelledby="workbench-title">
+        <div class="workbench-head">
+          <h2 id="workbench-title">Sheet</h2>
+          <span class="workbench-meta" id="workbench-meta"></span>
+        </div>
+        <div class="workbench-surface" id="workbench-surface">
+          <div class="workbench-cards" id="workbench-cards"></div>
+        </div>
+        <p class="multi-hint" id="multi-input-hint">
+          Several inputs on the sheet — mixing modalities is OK; wiring rules come later.
+        </p>
+      </section>
+    </main>
+
+    <footer class="status-bar">
+      <span>Run is a stub for now — it only nudges the workshop conversation, no models.</span>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
