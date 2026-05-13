@@ -1,5 +1,5 @@
 /**
- * Workshop AI Sandbox — UI mock-up only (no backend).
+ * Workshop AI Sandbox — workbench UI mock-up (no backend).
  */
 
 const INPUT_TYPES = [
@@ -28,60 +28,24 @@ const OUTPUT_TYPES = [
   { id: "video-live", icon: "📺", title: "Video (live)", desc: "Live composite or stream out", live: true },
 ];
 
+const ROLE_LABEL = { input: "Input", process: "Process", output: "Output" };
+
 const state = {
-  inputs: [],
-  process: [],
-  outputs: [],
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string }[]} */
+  blocks: [],
 };
 
-let modalLane = null;
 let idSeq = 0;
 
-function uid(prefix) {
+function uid() {
   idSeq += 1;
-  return `${prefix}-${idSeq}`;
+  return `b-${idSeq}`;
 }
 
-function findDef(lane, id) {
+function findDef(role, typeId) {
   const list =
-    lane === "input" ? INPUT_TYPES : lane === "process" ? PROCESS_TYPES : OUTPUT_TYPES;
-  return list.find((t) => t.id === id);
-}
-
-function renderCards(lane, container) {
-  container.innerHTML = "";
-  const key = lane === "input" ? "inputs" : lane === "process" ? "process" : "outputs";
-  const items = state[key];
-
-  items.forEach((item) => {
-    const def = findDef(lane, item.typeId);
-    if (!def) return;
-
-    const card = document.createElement("article");
-    card.className = "card" + (def.live ? " live" : "");
-    card.dataset.itemId = item.id;
-
-    card.innerHTML = `
-      <span class="icon" aria-hidden="true">${def.icon}</span>
-      <div class="body">
-        <span class="title">${escapeHtml(def.title)}</span>
-        <span class="meta">${escapeHtml(def.desc)}</span>
-      </div>
-      <button type="button" class="remove" aria-label="Remove ${escapeHtml(def.title)}">×</button>
-    `;
-
-    card.querySelector(".remove").addEventListener("click", () => {
-      state[key] = state[key].filter((x) => x.id !== item.id);
-      renderAll();
-    });
-
-    container.appendChild(card);
-  });
-
-  const multi = document.getElementById("multi-input-hint");
-  if (multi) {
-    multi.classList.toggle("visible", lane === "input" && state.inputs.length > 1);
-  }
+    role === "input" ? INPUT_TYPES : role === "process" ? PROCESS_TYPES : OUTPUT_TYPES;
+  return list.find((t) => t.id === typeId);
 }
 
 function escapeHtml(s) {
@@ -92,100 +56,132 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function renderAll() {
-  renderCards("input", document.getElementById("inputs-cards"));
-  renderCards("process", document.getElementById("process-cards"));
-  renderCards("output", document.getElementById("outputs-cards"));
+function addBlock(role, typeId) {
+  state.blocks.push({ id: uid(), role, typeId });
+  renderAll();
 }
 
-function openModal(lane) {
-  modalLane = lane;
-  const backdrop = document.getElementById("modal-backdrop");
-  const title = document.getElementById("modal-title");
-  const subtitle = document.getElementById("modal-subtitle");
-  const grid = document.getElementById("option-grid");
+function renderPalette() {
+  fillPalette("palette-inputs", INPUT_TYPES, "input");
+  fillPalette("palette-process", PROCESS_TYPES, "process");
+  fillPalette("palette-output", OUTPUT_TYPES, "output");
+}
 
-  const labels = {
-    input: "Add input",
-    process: "Add processing block",
-    output: "Add output",
-  };
-  const subs = {
-    input: "Combine multiple modalities (e.g. text + image).",
-    process: "Stack how the model should think and act.",
-    output: "Choose what participants should see or hear.",
-  };
-
-  title.textContent = labels[lane];
-  subtitle.textContent = subs[lane];
-
-  const types = lane === "input" ? INPUT_TYPES : lane === "process" ? PROCESS_TYPES : OUTPUT_TYPES;
-
-  grid.innerHTML = "";
+function fillPalette(containerId, types, role) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = "";
   types.forEach((t) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "option-btn";
-    btn.innerHTML = `
-      <span class="label">${t.icon} ${escapeHtml(t.title)}</span>
-      <span class="desc">${escapeHtml(t.desc)}</span>
-    `;
-    btn.addEventListener("click", () => {
-      const key = lane === "input" ? "inputs" : lane === "process" ? "process" : "outputs";
-      state[key].push({ id: uid(key), typeId: t.id });
-      closeModal();
-      renderAll();
-    });
-    grid.appendChild(btn);
+    btn.className = "part";
+    btn.title = t.desc;
+    btn.innerHTML = `<span class="pi" aria-hidden="true">${t.icon}</span><span>${escapeHtml(t.title)}</span>`;
+    btn.addEventListener("click", () => addBlock(role, t.id));
+    el.appendChild(btn);
   });
-
-  backdrop.classList.add("open");
-  document.getElementById("modal-close").focus();
 }
 
-function closeModal() {
-  modalLane = null;
-  document.getElementById("modal-backdrop").classList.remove("open");
+function renderWorkbench() {
+  const root = document.getElementById("workbench-cards");
+  root.innerHTML = "";
+
+  state.blocks.forEach((item) => {
+    const def = findDef(item.role, item.typeId);
+    if (!def) return;
+
+    const card = document.createElement("article");
+    card.className =
+      "card role-" +
+      (item.role === "input" ? "input" : item.role === "process" ? "process" : "output") +
+      (def.live ? " live" : "");
+    card.dataset.itemId = item.id;
+
+    card.innerHTML = `
+      <span class="role-pill">${escapeHtml(ROLE_LABEL[item.role])}</span>
+      <span class="icon" aria-hidden="true">${def.icon}</span>
+      <div class="body">
+        <span class="title">${escapeHtml(def.title)}</span>
+        <span class="meta">${escapeHtml(def.desc)}</span>
+      </div>
+      <button type="button" class="remove" aria-label="Remove ${escapeHtml(def.title)}">×</button>
+    `;
+
+    card.querySelector(".remove").addEventListener("click", () => {
+      state.blocks = state.blocks.filter((x) => x.id !== item.id);
+      renderAll();
+    });
+
+    root.appendChild(card);
+  });
+
+  const inputs = state.blocks.filter((b) => b.role === "input").length;
+  const proc = state.blocks.filter((b) => b.role === "process").length;
+  const outs = state.blocks.filter((b) => b.role === "output").length;
+  const meta = document.getElementById("workbench-meta");
+  const n = state.blocks.length;
+  meta.textContent =
+    n === 0
+      ? "Nothing placed"
+      : `${n} part${n === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output`;
+
+  const multi = document.getElementById("multi-input-hint");
+  multi.classList.toggle("visible", inputs > 1);
+}
+
+function renderAll() {
+  renderWorkbench();
 }
 
 function applyPreset(presetId, silent) {
-  state.inputs = [];
-  state.process = [];
-  state.outputs = [];
+  state.blocks = [];
 
   const presets = {
     "text-prompt": {
-      inputs: ["text"],
-      process: ["instruction"],
-      outputs: ["text"],
+      blocks: [
+        { role: "input", typeId: "text" },
+        { role: "process", typeId: "instruction" },
+        { role: "output", typeId: "text" },
+      ],
     },
-    "vision": {
-      inputs: ["image", "text"],
-      process: ["instruction", "vector-db"],
-      outputs: ["text"],
+    vision: {
+      blocks: [
+        { role: "input", typeId: "image" },
+        { role: "input", typeId: "text" },
+        { role: "process", typeId: "instruction" },
+        { role: "process", typeId: "vector-db" },
+        { role: "output", typeId: "text" },
+      ],
     },
     "live-audio": {
-      inputs: ["audio-live"],
-      process: ["instruction", "tooling"],
-      outputs: ["text", "audio-live"],
+      blocks: [
+        { role: "input", typeId: "audio-live" },
+        { role: "process", typeId: "instruction" },
+        { role: "process", typeId: "tooling" },
+        { role: "output", typeId: "text" },
+        { role: "output", typeId: "audio-live" },
+      ],
     },
     "multimodal-out": {
-      inputs: ["text", "video-rec"],
-      process: ["instruction", "skills", "loop"],
-      outputs: ["text", "image"],
+      blocks: [
+        { role: "input", typeId: "text" },
+        { role: "input", typeId: "video-rec" },
+        { role: "process", typeId: "instruction" },
+        { role: "process", typeId: "skills" },
+        { role: "process", typeId: "loop" },
+        { role: "output", typeId: "text" },
+        { role: "output", typeId: "image" },
+      ],
     },
   };
 
   const p = presets[presetId];
   if (!p) return;
 
-  p.inputs.forEach((typeId) => state.inputs.push({ id: uid("inputs"), typeId }));
-  p.process.forEach((typeId) => state.process.push({ id: uid("process"), typeId }));
-  p.outputs.forEach((typeId) => state.outputs.push({ id: uid("outputs"), typeId }));
+  p.blocks.forEach((b) => state.blocks.push({ id: uid(), role: b.role, typeId: b.typeId }));
 
   renderAll();
   if (!silent) {
-    showToast("Loaded a starter layout. Edit freely — nothing runs yet.");
+    showToast("Example sheet loaded — change anything, nothing executes yet.");
   }
 }
 
@@ -198,33 +194,24 @@ function showToast(message) {
 }
 
 function init() {
-  document.getElementById("btn-add-input").addEventListener("click", () => openModal("input"));
-  document.getElementById("btn-add-process").addEventListener("click", () => openModal("process"));
-  document.getElementById("btn-add-output").addEventListener("click", () => openModal("output"));
-
-  document.getElementById("modal-close").addEventListener("click", closeModal);
-  document.getElementById("modal-backdrop").addEventListener("click", (e) => {
-    if (e.target.id === "modal-backdrop") closeModal();
-  });
-
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal();
-  });
+  renderPalette();
 
   document.querySelectorAll("[data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => applyPreset(btn.getAttribute("data-preset"), false));
   });
 
   document.getElementById("btn-run-mock").addEventListener("click", () => {
-    showToast("Preview only: wiring to real models comes in a later step.");
+    if (state.blocks.length === 0) {
+      showToast("Sheet is empty — add parts before a real run would make sense.");
+      return;
+    }
+    showToast("Stub run: later this would execute the sheet. Still mock-only.");
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
-    state.inputs = [];
-    state.process = [];
-    state.outputs = [];
+    state.blocks = [];
     renderAll();
-    showToast("Cleared the board.");
+    showToast("Sheet cleared.");
   });
 
   applyPreset("text-prompt", true);
