@@ -3,29 +3,29 @@
  */
 
 const INPUT_TYPES = [
-  { id: "text", icon: "📝", title: "Text", desc: "Typed or pasted text", live: false },
-  { id: "image", icon: "🖼️", title: "Image", desc: "Upload or reference stills", live: false },
-  { id: "audio-rec", icon: "🎙️", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
-  { id: "audio-live", icon: "🔊", title: "Audio (live)", desc: "Streaming microphone", live: true },
-  { id: "video-live", icon: "📹", title: "Video (live)", desc: "Webcam / screen stream", live: true },
-  { id: "video-rec", icon: "🎬", title: "Video (recorded)", desc: "File-based video", live: false },
+  { id: "text", code: "TXT", title: "Text", desc: "Typed or pasted text", live: false },
+  { id: "image", code: "IMG", title: "Image", desc: "Upload or reference stills", live: false },
+  { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
+  { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streaming microphone", live: true },
+  { id: "video-live", code: "V·L", title: "Video (live)", desc: "Webcam / screen stream", live: true },
+  { id: "video-rec", code: "V·R", title: "Video (recorded)", desc: "File-based video", live: false },
 ];
 
 const PROCESS_TYPES = [
-  { id: "instruction", icon: "✳️", title: "Instruction", desc: "Natural-language task or prompt", live: false },
-  { id: "vector-db", icon: "🧠", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
-  { id: "loop", icon: "🔁", title: "Loop / retry", desc: "Iterate until a condition is met", live: false },
-  { id: "tooling", icon: "🛠️", title: "Tooling", desc: "APIs, code, external tools", live: false },
-  { id: "skills", icon: "📎", title: "Skills / context", desc: "Bundled rules, docs, or skill packs", live: false },
+  { id: "instruction", code: "INS", title: "Instruction", desc: "Natural-language task or prompt", live: false },
+  { id: "vector-db", code: "RAG", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
+  { id: "loop", code: "LP", title: "Loop / retry", desc: "Iterate until a condition is met", live: false },
+  { id: "tooling", code: "TLS", title: "Tooling", desc: "APIs, code, external tools", live: false },
+  { id: "skills", code: "SKL", title: "Skills / context", desc: "Bundled rules, docs, or skill packs", live: false },
 ];
 
 const OUTPUT_TYPES = [
-  { id: "text", icon: "📄", title: "Text", desc: "Structured or free-form reply", live: false },
-  { id: "image", icon: "🎨", title: "Image", desc: "Generated or edited visuals", live: false },
-  { id: "audio", icon: "🔈", title: "Audio", desc: "Speech or sound file", live: false },
-  { id: "audio-live", icon: "📡", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
-  { id: "video", icon: "🎞️", title: "Video", desc: "Rendered or composed video", live: false },
-  { id: "video-live", icon: "📺", title: "Video (live)", desc: "Live composite or stream out", live: true },
+  { id: "text", code: "TXT", title: "Text", desc: "Structured or free-form reply", live: false },
+  { id: "image", code: "IMG", title: "Image", desc: "Generated or edited visuals", live: false },
+  { id: "audio", code: "AUD", title: "Audio", desc: "Speech or sound file", live: false },
+  { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
+  { id: "video", code: "VID", title: "Video", desc: "Rendered or composed video", live: false },
+  { id: "video-live", code: "V·L", title: "Video (live)", desc: "Live composite or stream out", live: true },
 ];
 
 const ROLE_LABEL = { input: "Input", process: "Process", output: "Output" };
@@ -75,7 +75,7 @@ function fillPalette(containerId, types, role) {
     btn.type = "button";
     btn.className = "part";
     btn.title = t.desc;
-    btn.innerHTML = `<span class="pi" aria-hidden="true">${t.icon}</span><span>${escapeHtml(t.title)}</span>`;
+    btn.innerHTML = `<span class="pi" aria-hidden="true">${escapeHtml(t.code)}</span><span>${escapeHtml(t.title)}</span>`;
     btn.addEventListener("click", () => addBlock(role, t.id));
     el.appendChild(btn);
   });
@@ -98,7 +98,7 @@ function renderWorkbench() {
 
     card.innerHTML = `
       <span class="role-pill">${escapeHtml(ROLE_LABEL[item.role])}</span>
-      <span class="icon" aria-hidden="true">${def.icon}</span>
+      <span class="icon" aria-hidden="true">${escapeHtml(def.code)}</span>
       <div class="body">
         <span class="title">${escapeHtml(def.title)}</span>
         <span class="meta">${escapeHtml(def.desc)}</span>

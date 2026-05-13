@@ -4,12 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Workshop Sandbox — Workbench mock-up</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;1,9..40,400&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -32,8 +26,8 @@
 
     <main class="work-shell">
       <aside class="palette" aria-label="Block palette">
-        <h2 class="palette-title">Parts bin</h2>
-        <p class="palette-lede">Tap a part to drop it on the sheet. Remove with ×. Order is yours to figure out later.</p>
+        <h2 class="palette-title">Module library</h2>
+        <p class="palette-lede">Add modules to the sheet; remove with ×. Wiring and execution order are defined later.</p>
 
         <div class="palette-group">
           <h3 class="palette-group-title">Inputs</h3>
@@ -49,13 +43,13 @@
         </div>
 
         <section class="examples" aria-labelledby="examples-title">
-          <h3 id="examples-title">Example sheets</h3>
-          <p class="examples-hint">Jump-start a layout; swap parts freely.</p>
+          <h3 id="examples-title">Example layouts</h3>
+          <p class="examples-hint">Load a starter configuration; edit freely.</p>
           <div class="examples-row">
-            <button type="button" class="chip" data-preset="text-prompt">Text play</button>
-            <button type="button" class="chip" data-preset="vision">Vision desk</button>
-            <button type="button" class="chip" data-preset="live-audio">Live audio lab</button>
-            <button type="button" class="chip" data-preset="multimodal-out">Kitchen sink</button>
+            <button type="button" class="chip" data-preset="text-prompt">Text pipeline</button>
+            <button type="button" class="chip" data-preset="vision">Vision + text</button>
+            <button type="button" class="chip" data-preset="live-audio">Live audio</button>
+            <button type="button" class="chip" data-preset="multimodal-out">Multimodal output</button>
           </div>
         </section>
       </aside>
