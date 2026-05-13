@@ -17,8 +17,7 @@ const INPUT_TYPES = [
 const PROCESS_TYPES = [
   { id: "instruction", code: "INS", title: "Instruction", desc: "Natural-language task or prompt", live: false },
   { id: "vector-db", code: "RAG", title: "Knowledge / vectors", desc: "Retrieval from a vector store", live: false },
-  { id: "tooling", code: "TLS", title: "Tooling", desc: "APIs, code, external tools", live: false },
-  { id: "skills", code: "SKL", title: "Skills / context", desc: "Bundled rules, docs, or skill packs", live: false },
+  { id: "skills", code: "SKL", title: "Skills / context", desc: "Platform-hosted skill presets", live: false },
 ];
 
 const OUTPUT_TYPES = [
@@ -31,6 +30,23 @@ const OUTPUT_TYPES = [
 ];
 
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
+
+/** Voices documented for Speech / modal audio (`/v1/audio/speech`, chat `audio.voice`). */
+const OPENAI_VOICE_SELECT_OPTIONS = [
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+  "marin",
+  "cedar",
+].map((v) => ({ value: v, label: v }));
 
 /** @type {Map<string, MediaStream>} block id → active preview stream */
 const blockMediaStreams = new Map();
@@ -388,17 +404,7 @@ const FORM_SCHEMA = {
         key: "outputVoice",
         label: "Spoken voice (if audio out)",
         type: "select",
-        options: [
-          { value: "alloy", label: "alloy" },
-          { value: "ash", label: "ash" },
-          { value: "ballad", label: "ballad" },
-          { value: "coral", label: "coral" },
-          { value: "echo", label: "echo" },
-          { value: "sage", label: "sage" },
-          { value: "shimmer", label: "shimmer" },
-          { value: "marin", label: "marin" },
-          { value: "cedar", label: "cedar" },
-        ],
+        options: OPENAI_VOICE_SELECT_OPTIONS,
       },
       {
         key: "stream",
@@ -439,103 +445,38 @@ const FORM_SCHEMA = {
       },
     ],
   },
-  "process:tooling": {
-    apiMapping:
-      "Responses / Chat `tools`: `function`, `web_search`, `file_search`, custom tools — plus your own HTTP connectors executed server-side.",
-    defaults: {
-      toolKind: "function",
-      toolName: "lookup_customer",
-      toolDescription: "Fetch CRM row by id.",
-      webSearchContext: "medium",
-      allowedDomains: "",
-      endpoint: "https://api.example.com/v1/mock",
-      timeoutMs: "800",
-    },
-    fields: [
-      {
-        key: "toolKind",
-        label: "Tooling pattern",
-        type: "select",
-        options: [
-          { value: "function", label: "Function tool (JSON schema on server)" },
-          { value: "web_search", label: "Built-in web_search" },
-          { value: "file_search", label: "Built-in file_search (vector stores)" },
-          { value: "http_json", label: "Custom HTTP (your middleware)" },
-        ],
-      },
-      { key: "toolName", label: "Function name / id", type: "text", placeholder: "get_weather…" },
-      {
-        key: "toolDescription",
-        label: "Function description",
-        type: "textarea",
-        rows: 2,
-        placeholder: "Shown to the model when toolKind=function",
-      },
-      {
-        key: "webSearchContext",
-        label: "Web search context budget",
-        type: "select",
-        options: [
-          { value: "low", label: "low" },
-          { value: "medium", label: "medium (default)" },
-          { value: "high", label: "high" },
-        ],
-      },
-      {
-        key: "allowedDomains",
-        label: "Allowed domains (optional)",
-        type: "text",
-        placeholder: "pubmed.ncbi.nlm.nih.gov, … comma-separated",
-      },
-      { key: "endpoint", label: "Custom endpoint (if HTTP)", type: "text", placeholder: "https://…" },
-      { key: "timeoutMs", label: "Timeout (ms)", type: "number", placeholder: "800" },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Participants configure intent here; engineers map rows to actual JSON schemas / vector IDs.",
-      },
-    ],
-  },
   "process:skills": {
     apiMapping:
-      "Typically extra `system` / `developer` text, uploaded instruction files (`input_file`), or future Skills product hooks — same messaging stack as chat.",
-    defaults: { packId: "workshop-default", injectMode: "prepend", packFileStub: "" },
+      "Adds a platform-maintained skill / instruction preset (wired server-side to system or developer prompts). Optional today; no workshop file upload.",
+    defaults: { skillPreset: "workshop-general" },
     fields: [
-      { key: "packId", label: "Pack name / id", type: "text", placeholder: "HR policy pack v3" },
       {
-        key: "injectMode",
-        label: "How to merge",
+        key: "skillPreset",
+        label: "Skill pack",
         type: "select",
         options: [
-          { value: "prepend", label: "Prepend to system/developer message" },
-          { value: "append", label: "Append after user instructions" },
-          { value: "file_only", label: "Attach as `input_file` parts" },
+          { value: "none", label: "— No skill pack —" },
+          { value: "workshop-general", label: "Workshop · facilitation (default)" },
+          { value: "workshop-writing", label: "Workshop · drafting & rewriting" },
+          { value: "workshop-compliance", label: "Workshop · careful / policy-aware tone" },
+          { value: "workshop-brief-de", label: "Workshop · concise German summaries" },
         ],
-      },
-      {
-        key: "packFileStub",
-        label: "Upload pack (.md / .txt)",
-        type: "dropzone",
-        accept: ".md,.txt,.pdf",
-        dropLabel: "Drop instruction file",
       },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Workshop-friendly: treat packs as curated markdown; engineers wire to Files API + retrieval as needed.",
+        hint: "Values are stubs for this demo; your backend maps each key to curated instructions.",
       },
     ],
   },
   "output:text": {
     apiMapping:
-      "Assistant `content` in Chat Completions, or `output_text` items in Responses — `response_format`, streaming.",
+      "Assistant `content` in Chat Completions, or `output_text` in Responses — shown here as a chat-style thread for the workshop.",
     defaults: {
       format: "markdown",
       maxCompletionTokens: "1024",
       stream: "false",
-      jsonSchemaStub: "",
     },
     fields: [
       {
@@ -543,9 +484,9 @@ const FORM_SCHEMA = {
         label: "Presentation",
         type: "select",
         options: [
-          { value: "markdown", label: "Markdown (rendered client-side)" },
+          { value: "markdown", label: "Markdown" },
           { value: "plain", label: "Plain text" },
-          { value: "json_schema", label: "Structured JSON (schema on server)" },
+          { value: "json_schema", label: "Structured JSON (server)" },
         ],
       },
       {
@@ -564,17 +505,10 @@ const FORM_SCHEMA = {
         ],
       },
       {
-        key: "jsonSchemaStub",
-        label: "JSON schema file (optional)",
-        type: "dropzone",
-        accept: ".json,.schema",
-        dropLabel: "Drop schema draft (not executed here)",
-      },
-      {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Structured outputs: prefer `response_format.type = json_schema` on supported models (see Structured Outputs guide).",
+        hint: "Thread above reflects the current pipeline (mock). Connect a backend to thread real messages.",
       },
     ],
   },
@@ -696,18 +630,7 @@ const FORM_SCHEMA = {
         key: "voice",
         label: "Voice",
         type: "select",
-        options: [
-          { value: "alloy", label: "alloy" },
-          { value: "ash", label: "ash" },
-          { value: "ballad", label: "ballad" },
-          { value: "coral", label: "coral" },
-          { value: "echo", label: "echo" },
-          { value: "sage", label: "sage" },
-          { value: "shimmer", label: "shimmer" },
-          { value: "verse", label: "verse" },
-          { value: "marin", label: "marin" },
-          { value: "cedar", label: "cedar" },
-        ],
+        options: OPENAI_VOICE_SELECT_OPTIONS,
       },
       { key: "speed", label: "Speed (0.25–4.0)", type: "text", placeholder: "1.0" },
       {
@@ -738,105 +661,53 @@ const FORM_SCHEMA = {
   },
   "output:audio-live": {
     apiMapping:
-      "Realtime audio out or streamed speech — combine Realtime session with `modalities: [\"text\",\"audio\"]` on audio-capable chat models for simpler cases.",
+      "Realtime / streamed speech uses the same built-in voice names as TTS where applicable; transport (WebRTC vs WebSocket) is an implementation choice, not a workshop field.",
     defaults: {
-      transport: "webrtc",
-      playoutVoice: "marin",
-      streamFormat: "audio",
-      bitrateKbps: "160",
+      voice: "marin",
     },
     fields: [
       {
-        key: "transport",
-        label: "Delivery",
-        type: "select",
-        options: [
-          { value: "webrtc", label: "WebRTC (low latency)" },
-          { value: "websocket", label: "WebSocket" },
-          { value: "sse", label: "SSE (`stream_format: sse` for TTS)" },
-        ],
-      },
-      {
-        key: "playoutVoice",
+        key: "voice",
         label: "Voice",
         type: "select",
-        options: [
-          { value: "marin", label: "marin" },
-          { value: "cedar", label: "cedar" },
-          { value: "alloy", label: "alloy" },
-          { value: "shimmer", label: "shimmer" },
-        ],
+        options: OPENAI_VOICE_SELECT_OPTIONS,
       },
-      {
-        key: "streamFormat",
-        label: "Chunk format",
-        type: "select",
-        options: [
-          { value: "audio", label: "audio" },
-          { value: "sse", label: "sse" },
-        ],
-      },
-      { key: "bitrateKbps", label: "Target bitrate (kbps)", type: "number", placeholder: "160" },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Expose transport + voice only; engineers bind to Realtime events or streamed TTS responses.",
+        hint: "How audio is delivered is chosen in your app layer; participants only pick the voice character here.",
       },
     ],
   },
   "output:video": {
     apiMapping:
-      "OpenAI does not ship a first-party “text-to-video clip” API in the core reference — treat as downstream compositing (FFmpeg, NLE) or partner video models.",
-    defaults: { resolution: "1920x1080", fps: "30", durationSec: "12", exportHint: "H.264 MP4 via post pipeline" },
+      "OpenAI’s core API reference does **not** include end-to-end text-to-video generation. These notes are **only participant intent** — implement with offline tools, vendors, or your own stacks.",
+    defaults: { resolution: "1920x1080", fps: "30", durationSec: "12" },
     fields: [
       { key: "resolution", label: "Target resolution", type: "text", placeholder: "1920x1080" },
       { key: "fps", label: "Frame rate", type: "number", placeholder: "30" },
       { key: "durationSec", label: "Duration (sec)", type: "number", placeholder: "12" },
       {
-        key: "exportHint",
-        label: "Export / codec hint",
-        type: "text",
-        placeholder: "For your media worker",
-      },
-      {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Workshop honesty: keep this block for storyboards + narration timing; generate stills with Images API, audio with Speech, mux offline.",
+        hint: "No `/v1/…/video` generator in the OpenAI reference — this block is for planning only.",
       },
     ],
   },
   "output:video-live": {
     apiMapping:
-      "Browser compositor (Canvas/WebRTC) — not an OpenAI REST primitive; pair with Realtime for audio while you control video layout client-side.",
-    defaults: { mixerLayout: "pip-right", encoder: "h264", branding: "Org logo overlay" },
+      "OpenAI does not expose a dedicated “live video compositor” HTTP API. Output target resolution is a **product** choice for your player or encoder.",
+    defaults: { resolution: "1920x1080", fps: "30" },
     fields: [
-      {
-        key: "mixerLayout",
-        label: "Compositor layout",
-        type: "select",
-        options: [
-          { value: "pip-right", label: "Picture-in-picture · right" },
-          { value: "grid-2", label: "Two-up grid" },
-          { value: "full-cam", label: "Full camera" },
-        ],
-      },
-      {
-        key: "encoder",
-        label: "Encoder",
-        type: "select",
-        options: [
-          { value: "h264", label: "H.264" },
-          { value: "vp9", label: "VP9" },
-        ],
-      },
-      { key: "branding", label: "Overlay / branding note", type: "text", placeholder: "Optional" },
+      { key: "resolution", label: "Target resolution", type: "text", placeholder: "1920x1080" },
+      { key: "fps", label: "Target frame rate", type: "number", placeholder: "30" },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Use this card to capture production intent; implementation stays in your streaming stack.",
+        hint: "Layout, codecs, and mixing are implementation details outside the OpenAI API surface.",
       },
     ],
   },
@@ -1300,6 +1171,260 @@ function renderCameraPreviewField(field, block, disabled, wrap) {
   wrap.appendChild(row);
 }
 
+/** @typedef {{ label: string, body: string, empty?: boolean }} ChatTurnPreview */
+
+/** @typedef {{ systemParts: { label: string, body: string }[], userTurns: ChatTurnPreview[], instructions: string }} ConversationSnapshot */
+
+/**
+ * Builds a lightweight view of upstream inputs & instructions for the text output card.
+ * @returns {ConversationSnapshot}
+ */
+function gatherConversationSnapshotForTextOutput() {
+  const blocks = state.blocks;
+
+  /** @type {{ label: string, body: string }[]} */
+  const systemParts = [];
+  const inst = blocks.find((b) => b.role === "process" && b.typeId === "instruction");
+  const sk = FORM_SCHEMA["process:skills"];
+
+  if (inst) {
+    const roleLab = String(inst.values.instructionRole || "system") === "developer" ? "Developer" : "System";
+    const sysTxt = String(inst.values.system || "").trim();
+    if (sysTxt) {
+      systemParts.push({ label: roleLab, body: sysTxt });
+    }
+  }
+
+  const skillBlock = blocks.find((b) => b.role === "process" && b.typeId === "skills");
+  if (skillBlock && sk && String(skillBlock.values.skillPreset || "none") !== "none") {
+    const fld = sk.fields.find((f) => f.key === "skillPreset");
+    const pick = fld && fld.options && fld.options.find((o) => o.value === skillBlock.values.skillPreset);
+    const labelTxt = pick ? pick.label : String(skillBlock.values.skillPreset || "");
+    systemParts.push({
+      label: "Skill pack",
+      body: `${labelTxt} — curated by the platform (server-side).`,
+    });
+  }
+
+  const know = blocks.find((b) => b.role === "process" && b.typeId === "vector-db");
+  const doc = know && String(know.values.knowledgeFiles || "").trim();
+  if (doc) {
+    systemParts.push({ label: "Knowledge files", body: doc });
+  }
+
+  /** @type {ChatTurnPreview[]} */
+  const userTurns = [];
+  blocks
+    .filter((b) => b.role === "input")
+    .forEach((b) => {
+      const idef = findDef("input", b.typeId);
+      const partTitle = idef ? idef.title : b.typeId;
+      let body = "";
+      if (b.typeId === "text") {
+        body = String(b.values.content || "").trim();
+        userTurns.push({
+          label: `Participant · ${partTitle}`,
+          body: body || "(empty)",
+          empty: !body,
+        });
+      } else {
+        const url = b.values.imageUrl && String(b.values.imageUrl).trim();
+        const up =
+          (b.values.uploadStub && String(b.values.uploadStub)) ||
+          (b.values.recordingStub && String(b.values.recordingStub)) ||
+          (b.values.knowledgeFiles && String(b.values.knowledgeFiles));
+        body = url || up || "(no file or URL)";
+        userTurns.push({
+          label: `Input · ${partTitle}`,
+          body,
+          empty: !(url || up),
+        });
+      }
+    });
+
+  const instructions =
+    inst && String(inst.values.user || "").trim() ? String(inst.values.user).trim() : "";
+
+  return { systemParts, userTurns, instructions };
+}
+
+function appendChatBubble(roleClass, roleLabel, bodyText) {
+  const row = document.createElement("div");
+  row.className = "output-chat-row output-chat-row-" + roleClass;
+  const tag = document.createElement("span");
+  tag.className = "output-chat-role";
+  tag.textContent = roleLabel;
+  const bubble = document.createElement("div");
+  bubble.className = "output-chat-bubble";
+  const pre = document.createElement("pre");
+  pre.className = "output-chat-body";
+  pre.textContent = bodyText || "(empty)";
+  bubble.appendChild(pre);
+  row.appendChild(tag);
+  row.appendChild(bubble);
+  return row;
+}
+
+function renderOutputTextConversationPreview(block, card) {
+  const snap = gatherConversationSnapshotForTextOutput();
+  const thread = document.createElement("div");
+  thread.className = "output-chat-thread";
+
+  const lead = document.createElement("div");
+  lead.className = "output-chat-lede";
+  lead.textContent = "How the reply is framed — derived from pipeline inputs (preview only)";
+  thread.appendChild(lead);
+
+  if (!snap.systemParts.length) {
+    thread.appendChild(appendChatBubble("system", "System", "(no system / developer instructions yet)"));
+  } else {
+    snap.systemParts.forEach((part) => {
+      thread.appendChild(appendChatBubble("system", part.label, part.body));
+    });
+  }
+
+  if (!snap.userTurns.length) {
+    thread.appendChild(appendChatBubble("user", "User inputs", "(add input modules)"));
+  } else {
+    snap.userTurns.forEach((row) => {
+      thread.appendChild(appendChatBubble("user", row.label, row.body));
+    });
+  }
+
+  thread.appendChild(
+    appendChatBubble(
+      "instruction",
+      "Task / instructions",
+      snap.instructions || "(no Instruction module user prompt — empty)"
+    )
+  );
+
+  const asstRow = document.createElement("div");
+  asstRow.className = "output-chat-row output-chat-row-assistant";
+  const tag = document.createElement("span");
+  tag.className = "output-chat-role";
+  tag.textContent = "Assistant · output";
+  const bubble = document.createElement("div");
+  bubble.className = "output-chat-bubble output-chat-bubble-assistant";
+
+  const ta = document.createElement("textarea");
+  ta.className = "run-preview-inline output-chat-assistant-ta";
+  ta.readOnly = true;
+  ta.setAttribute("data-run-preview-block", block.id);
+  ta.rows = 6;
+  ta.placeholder = "Run the pipeline to simulate a reply here.";
+  ta.value = block.runPreview || "";
+  bubble.appendChild(ta);
+
+  asstRow.appendChild(tag);
+  asstRow.appendChild(bubble);
+  thread.appendChild(asstRow);
+
+  card.appendChild(thread);
+}
+
+function renderOutputTextModule(block, card, schema) {
+  renderOutputTextConversationPreview(block, card);
+
+  const form = document.createElement("div");
+  form.className = "module-card-fields output-text-settings";
+
+  const locked = state.running;
+  schema.fields.forEach((field, fidx) => {
+    if (field.type === "hint") {
+      const wrap = document.createElement("div");
+      wrap.className = "field field-compact";
+      renderHintField(field, wrap);
+      form.appendChild(wrap);
+      return;
+    }
+
+    const wrap = document.createElement("div");
+    wrap.className = "field field-compact";
+    const fid = `f-${block.id}-n${fidx}`;
+    let val = block.values[field.key];
+    if (val === undefined || val === null) val = "";
+
+    if (field.label) {
+      const lab = document.createElement("label");
+      lab.htmlFor = fid;
+      lab.textContent = field.label;
+      wrap.appendChild(lab);
+    }
+
+    if (field.type === "select" && field.options) {
+      const sel = document.createElement("select");
+      sel.id = fid;
+      sel.disabled = locked;
+      field.options.forEach((opt) => {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label;
+        sel.appendChild(o);
+      });
+      const strVal = String(val);
+      if (field.options.some((o) => o.value === strVal)) sel.value = strVal;
+      else {
+        sel.selectedIndex = 0;
+        block.values[field.key] = sel.value;
+      }
+      sel.addEventListener("change", () => {
+        block.values[field.key] = sel.value;
+      });
+      wrap.appendChild(sel);
+    } else if (field.type === "number") {
+      const inp = document.createElement("input");
+      inp.id = fid;
+      inp.type = "number";
+      inp.disabled = locked;
+      if (field.placeholder) inp.placeholder = field.placeholder;
+      inp.value = String(val);
+      inp.addEventListener("input", () => {
+        block.values[field.key] = inp.value;
+      });
+      wrap.appendChild(inp);
+    }
+    form.appendChild(wrap);
+  });
+
+  card.appendChild(form);
+}
+
+function appendImageOutputPlaceholder(block, card) {
+  const stage = document.createElement("div");
+  stage.className = "output-image-stage";
+
+  const ph = document.createElement("div");
+  ph.className = "output-image-placeholder";
+
+  const size = String(block.values.size || "1024x1024").trim();
+  const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size);
+  const maxPx = 200;
+  if (m) {
+    const iw = Number(m[1]);
+    const ih = Number(m[2]);
+    const scale = Math.min(maxPx / iw, maxPx / ih, 1);
+    ph.style.width = `${Math.round(iw * scale)}px`;
+    ph.style.height = `${Math.round(ih * scale)}px`;
+  } else {
+    ph.style.width = `${maxPx}px`;
+    ph.style.minHeight = "160px";
+  }
+
+  const cap = document.createElement("span");
+  cap.className = "output-image-placeholder-cap";
+  cap.textContent = "Generated image";
+  ph.appendChild(cap);
+
+  const sub = document.createElement("span");
+  sub.className = "output-image-placeholder-sub";
+  sub.textContent = `${size} · preview after run`;
+
+  stage.appendChild(ph);
+  stage.appendChild(sub);
+  card.appendChild(stage);
+}
+
 function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);
   if (!def) return;
@@ -1344,6 +1469,12 @@ function renderModuleCard(block, container) {
     p.textContent = "No fields for this type (mock).";
     card.appendChild(p);
     appendRunPreviewRow(block, card);
+    container.appendChild(card);
+    return;
+  }
+
+  if (block.role === "output" && block.typeId === "text") {
+    renderOutputTextModule(block, card, schema);
     container.appendChild(card);
     return;
   }
@@ -1426,6 +1557,9 @@ function renderModuleCard(block, container) {
         if (field.key === "source" && block.role === "input" && block.typeId === "video-live") {
           renderAll();
         }
+        if (field.key === "size" && block.role === "output" && block.typeId === "image") {
+          renderAll();
+        }
       });
       wrap.appendChild(sel);
     } else if (field.type === "dropzone") {
@@ -1460,6 +1594,9 @@ function renderModuleCard(block, container) {
   });
 
   card.appendChild(form);
+  if (block.role === "output" && block.typeId === "image") {
+    appendImageOutputPlaceholder(block, card);
+  }
   appendRunPreviewRow(block, card);
   container.appendChild(card);
 }
@@ -1478,6 +1615,7 @@ function sendInputsBatch() {
 
 function appendRunPreviewRow(block, card) {
   if (block.role !== "output") return;
+  if (block.typeId === "text") return;
 
   const wrap = document.createElement("div");
   wrap.className = "field field-compact field-run-preview";
@@ -1703,7 +1841,6 @@ function applyPreset(presetId, silent) {
       blocks: [
         { role: "input", typeId: "audio-live" },
         { role: "process", typeId: "instruction" },
-        { role: "process", typeId: "tooling" },
         { role: "output", typeId: "text" },
         { role: "output", typeId: "audio-live" },
       ],
