@@ -1,33 +1,7 @@
 import { planUsesRealtime } from "./knownModules.js";
+import { buildFullRealtimeInstructions } from "./orchestrateRealtime.js";
 
 const DEFAULT_REALTIME_MODEL = "gpt-4o-mini-realtime-preview";
-
-const SKILL_SNIPPETS = {
-  none: "",
-  "workshop-general":
-    "Facilitation: keep the group on track, ask clarifying questions, and summarize decisions briefly.",
-  "workshop-writing": "Writing: tighten wording, preserve intent, offer alternatives where useful.",
-  "workshop-compliance": "Tone: careful, policy-aware, avoid overclaiming; flag uncertainty explicitly.",
-  "workshop-brief-de": "Language: concise German summaries unless participants choose another language.",
-};
-
-/** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} plan */
-export function buildRealtimeInstructions(plan) {
-  const parts = [];
-  const inst = plan.blocks.find((b) => b.role === "process" && b.typeId === "instruction");
-  if (inst) {
-    const sys = String(inst.values?.system ?? "").trim();
-    if (sys) parts.push(sys);
-  }
-  const skill = plan.blocks.find((b) => b.role === "process" && b.typeId === "skills");
-  if (skill) {
-    const key = String(skill.values?.skillPreset ?? "none");
-    const extra = SKILL_SNIPPETS[key];
-    if (extra) parts.push(extra);
-  }
-  const merged = parts.join("\n\n").trim();
-  return merged || "You are a helpful workshop assistant.";
-}
 
 /** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} plan */
 export function pickOutputModalities(plan) {
@@ -79,7 +53,7 @@ export async function mintRealtimeClientSecret(plan, options = {}) {
   const model = options.model ?? process.env.OPENAI_REALTIME_MODEL ?? DEFAULT_REALTIME_MODEL;
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  const instructions = buildRealtimeInstructions(plan);
+  const instructions = buildFullRealtimeInstructions(plan);
   const voice = pickVoice(plan);
   const turn_detection = pickTurnDetection(plan);
   const output_modalities = pickOutputModalities(plan);

@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { validatePlan } from "./validatePlan.js";
+import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
 import { mintRealtimeClientSecret } from "./realtimeSession.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,11 +54,13 @@ export function createApp(opts) {
     try {
       const secret = await mintRealtimeClientSecret(result.plan);
       const base = (process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
+      const client_events = buildRealtimeBootstrapClientEvents(result.plan);
       return res.json({
         valid: true,
         mode: "realtime",
         client_secret: { value: secret.value, expires_at: secret.expires_at },
         realtime_calls_url: `${base}/realtime/calls`,
+        orchestration: { version: 1, client_events },
       });
     } catch (e) {
       const st = typeof e.status === "number" ? e.status : NaN;

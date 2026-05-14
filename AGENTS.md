@@ -4,7 +4,7 @@
 
 ### Project Overview
 
-This is **workshop-tools**: an HTML/CSS/JS **AI Workshop Sandbox** workbench under `workshop-sandbox/`, plus a small **Node.js** backend in `server/` (plan validation and OpenAI Realtime **client secrets**). The UI stays static files; there is no separate frontend build step for the workbench.
+This is **workshop-tools**: an HTML/CSS/JS **AI Workshop Sandbox** workbench under `workshop-sandbox/`, plus a small **Node.js** backend in `server/` (plan validation, Realtime **client secrets**, and **orchestration**: session instructions plus bootstrap `conversation.item.create` events for the data channel). The UI stays static files; there is no separate frontend build step for the workbench.
 
 ### Running the Application
 
@@ -33,8 +33,8 @@ docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
 
 ### Testing
 
-- **Server (automated):** `cd server && npm test` (Vitest: plan validation, Realtime session helper, HTTP routes with mocked `fetch`).
-- **Manual:** open the app from the Node server; load presets; for **Live audio**, click **Run** — the client validates the plan, obtains a client secret, and opens a **WebRTC** session to OpenAI (`/v1/realtime/calls`). Static-only hosting still supports the **mock** Run loop for non-live pipelines.
+- **Server (automated):** `cd server && npm test` (Vitest: plan validation, Realtime session mapping, orchestration bootstrap events, HTTP routes with mocked `fetch`).
+- **Manual:** open the app from the Node server; load presets; for **Live audio**, click **Run** — the client validates the plan, obtains a client secret, opens **WebRTC** to OpenAI (`/v1/realtime/calls`), then sends orchestration events on the `oai-events` channel. Static-only hosting still supports the **mock** Run loop for non-live pipelines.
 - No ESLint/Prettier is configured for the static UI.
 
 ### Key Caveats

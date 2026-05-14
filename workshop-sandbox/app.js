@@ -529,6 +529,10 @@ async function startRealtimeRun() {
       return;
     }
     const callsUrl = data.realtime_calls_url;
+    const bootstrapEvents =
+      data.orchestration && Array.isArray(data.orchestration.client_events)
+        ? data.orchestration.client_events
+        : [];
 
     const pc = new RTCPeerConnection();
     realtimePeerConnection = pc;
@@ -545,6 +549,21 @@ async function startRealtimeRun() {
     }
 
     const dc = pc.createDataChannel("oai-events");
+    if (bootstrapEvents.length) {
+      dc.addEventListener(
+        "open",
+        () => {
+          for (const ev of bootstrapEvents) {
+            try {
+              dc.send(JSON.stringify(ev));
+            } catch (err) {
+              console.warn("Orchestration bootstrap send failed", err);
+            }
+          }
+        },
+        { once: true },
+      );
+    }
     dc.addEventListener("message", (ev) => {
       try {
         const msg = JSON.parse(ev.data);

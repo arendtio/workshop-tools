@@ -1,18 +1,14 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildRealtimeInstructions,
-  mintRealtimeClientSecret,
-  pickOutputModalities,
-  pickTurnDetection,
-  pickVoice,
-} from "../src/realtimeSession.js";
+import { buildFullRealtimeInstructions } from "../src/orchestrateRealtime.js";
+import { mintRealtimeClientSecret, pickOutputModalities, pickTurnDetection, pickVoice } from "../src/realtimeSession.js";
 
 describe("realtimeSession helpers", () => {
-  it("merges instruction and skill snippets", () => {
-    const text = buildRealtimeInstructions({
+  it("merges instruction and skill snippets via orchestration", () => {
+    const text = buildFullRealtimeInstructions({
       blocks: [
         { role: "process", typeId: "instruction", values: { system: "Hello" } },
         { role: "process", typeId: "skills", values: { skillPreset: "workshop-writing" } },
+        { role: "output", typeId: "text", values: {} },
       ],
     });
     expect(text).toContain("Hello");
@@ -61,6 +57,7 @@ describe("mintRealtimeClientSecret", () => {
       expect(init.method).toBe("POST");
       const body = JSON.parse(String(init.body));
       expect(body.session.type).toBe("realtime");
+      expect(String(body.session.instructions)).toContain("Configured workshop outputs");
       return {
         ok: true,
         status: 200,

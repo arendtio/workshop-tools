@@ -89,5 +89,7 @@ describe("HTTP API", () => {
     expect(res.body.valid).toBe(true);
     expect(res.body.client_secret.value).toBe("ek_from_openai");
     expect(String(res.body.realtime_calls_url)).toContain("/realtime/calls");
+    expect(res.body.orchestration?.version).toBe(1);
+    expect(Array.isArray(res.body.orchestration?.client_events)).toBe(true);
   });
 });
