@@ -11,11 +11,15 @@
       <div class="header-left">
         <div class="brand">
           <h1>AI Workshop Sandbox</h1>
-          <p>Add modules on the left; inputs, processing, and outputs show together in the center — UI mock-up only.</p>
+          <p>
+            Add modules on the left; inputs, processing, and outputs show together in the center. Serve with the workshop
+            Node server for plan validation and live Realtime (WebRTC); static-only hosting keeps the mock run for other
+            pipelines.
+          </p>
         </div>
         <div class="badges">
-          <span class="badge mock">Mock-up</span>
-          <span class="badge">No backend</span>
+          <span class="badge mock">Workbench</span>
+          <span class="badge">API when same-origin server</span>
         </div>
       </div>
       <div class="header-actions">
@@ -72,7 +76,8 @@
 
     <footer class="status-bar">
       <span id="status-bar-text"
-        >Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.</span
+        >Run: mock loop for non-live pipelines, or Realtime WebRTC when live audio modules are present and the page is
+        served from the workshop server (see AGENTS.md).</span
       >
     </footer>
 

@@ -5,27 +5,34 @@
 
 ## Goal
 
-The **deployment unit** for this project is a **single Docker image** that runs an **HTTP server** and serves the application (today the static UI under `workshop-sandbox/`; later including a backend when that exists). There is **no application-level HTTPS** inside the container; operators terminate TLS **outside** this repository (for example with a reverse proxy or platform ingress).
+The **deployment unit** for this project is a **single Docker image** that runs an **HTTP server** on port **8080** by default: it serves the static UI under `workshop-sandbox/` and the **Node workshop API** under `/api/*` (plan validation and Realtime client secrets). There is **no application-level HTTPS** inside the container; operators terminate TLS **outside** this repository (for example with a reverse proxy or platform ingress).
 
 ## Scope
 
 | In scope (design) | Out of scope (this repo) |
 |-------------------|---------------------------|
-| Target shape: one container, HTTP server, build via image definition when added | Reverse proxy, certificates, or HTTPS configuration |
-| Image build as part of a deploy pipeline once a `Dockerfile` exists | Pre-publishing images to a registry (optional per environment) |
-| Plain HTTP on a defined container port at the workload | mTLS, WAF, or edge routing beyond documenting the HTTP port |
+| One container: Node HTTP server, static UI + `/api` routes | Reverse proxy, certificates, or HTTPS configuration |
+| `Dockerfile` + `.dockerignore` in repo root | Pre-publishing images to a registry (optional per environment) |
+| Plain HTTP on port **8080** inside the container (override with `PORT`) | mTLS, WAF, or edge routing beyond documenting the HTTP port |
 
-## Dockerfile and `.dockerignore` (deferred)
+## Dockerfile and `.dockerignore`
 
-A **`Dockerfile`** (and typically **`.dockerignore`**) will be introduced **when the application has enough substance to warrant it**—in particular when there is a **backend** and deployment packaging is meaningful. Until then, this repository **does not** ship those files; local work continues to use a simple static server (see **`AGENTS.md`**).
+The repository root **`Dockerfile`** builds the workshop image: it installs production dependencies from `server/package-lock.json`, copies `workshop-sandbox/` and `server/`, and starts `node server/src/index.js`.
 
-When added, the image should still follow the contract below (HTTP inside the container, TLS at the edge).
+**Runtime secrets:** pass the long-lived OpenAI key at run time, for example:
+
+```sh
+docker build -t workshop-tools .
+docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
+```
+
+Optional: `OPENAI_REALTIME_MODEL` (defaults to a cost-conscious Realtime model), `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
 
 ## Container contract (when an image exists)
 
-1. **Process:** an HTTP server serves the deployable assets (static files today; static plus API or other processes once a backend exists).
+1. **Process:** Node serves static assets from `workshop-sandbox/` and JSON APIs under `/api/`.
 2. **Protocol:** **HTTP only** between the reverse proxy (or client) and the container, unless the platform injects TLS in front of the workload without changing this image.
-3. **Port:** expose a **single well-documented TCP port** for HTTP (conventionally **80** for a static front-end; adjust if the stack uses another port).
+3. **Port:** expose **8080** for HTTP unless overridden with the `PORT` environment variable.
 4. **Build:** the image is produced by **`docker build`** (or equivalent in CI). Build steps may grow once backend and assets need compilation or dependency installs.
 
 ## Reverse proxy and HTTPS
@@ -40,7 +47,8 @@ The reverse proxy is owned and operated **outside** this codebase; this reposito
 
 ## Local development (current)
 
-Until a container image is defined in-repo, use **`AGENTS.md`** (for example `python3 -m http.server` for `workshop-sandbox/`).
+- **Full stack (recommended):** from the repository root, `cd server && npm install && npm start` then open `http://localhost:8080` (static UI + `/api`).
+- **UI only:** `python3 -m http.server 8080 --directory workshop-sandbox` — Run uses the **mock** loop only; live-audio pipelines need the Node server on the **same origin** for validation and Realtime client secrets.
 
 ## Related files
 

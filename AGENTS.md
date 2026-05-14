@@ -4,28 +4,41 @@
 
 ### Project Overview
 
-This is **workshop-tools**, a static HTML/CSS/JS UI mock-up of an AI Workshop Sandbox (workbench for wiring AI pipeline components). There is no backend, no build step, and no package manager dependencies.
-
-The actual application code lives in `workshop-sandbox/` (on the feature branch `cursor/ai-workshop-sandbox-mockup-c4a1`).
+This is **workshop-tools**: an HTML/CSS/JS **AI Workshop Sandbox** workbench under `workshop-sandbox/`, plus a small **Node.js** backend in `server/` (plan validation, Realtime **client secrets**, and **orchestration**: session instructions plus bootstrap `conversation.item.create` events for the data channel). The UI stays static files; there is no separate frontend build step for the workbench.
 
 ### Running the Application
 
-Serve the `workshop-sandbox/` directory with any static HTTP server:
+**Full stack (static UI + API, same origin)** — from the repository root:
+
+```sh
+cd server && npm install && npm start
+```
+
+Then open `http://localhost:8080` (Express serves `workshop-sandbox/` and mounts `/api/*`).
+
+**UI only (mock Run)** — no `/api` routes:
 
 ```sh
 python3 -m http.server 8080 --directory workshop-sandbox
 ```
 
-Then open `http://localhost:8080` in a browser.
+Then open `http://localhost:8080`. Pipelines with **live audio** modules need the Node server so **Run** can validate the plan and mint an ephemeral Realtime key.
+
+**Docker** — build and run (set your API key in the environment):
+
+```sh
+docker build -t workshop-tools .
+docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
+```
 
 ### Testing
 
-- **No automated test framework** is configured. The app is a pure UI mock-up.
-- Manual testing: open in browser, click palette buttons to add blocks to the sheet, use preset buttons, click "Run" (stub), and click "Clear sheet".
-- No lint tooling is configured (no ESLint, no Prettier).
+- **Server (automated):** `cd server && npm test` (Vitest: plan validation, Realtime session mapping, orchestration bootstrap events, HTTP routes with mocked `fetch`).
+- **Manual:** open the app from the Node server; load presets; for **Live audio**, click **Run** — the client validates the plan, obtains a client secret, opens **WebRTC** to OpenAI (`/v1/realtime/calls`), then sends orchestration events on the `oai-events` channel. Static-only hosting still supports the **mock** Run loop for non-live pipelines.
+- No ESLint/Prettier is configured for the static UI.
 
 ### Key Caveats
 
-- The `main` branch contains only `README.md`. All product code is on the feature branch.
-- The "Run" button is a stub — it shows a toast but does not execute anything.
-- Google Fonts (DM Sans) is loaded via CDN; offline environments will fall back to system-ui.
+- **Authentication** is intentionally omitted for now; protect the deployment at the network edge if needed.
+- **OpenAI:** the long-lived key is **`OPENAI_API_KEY`** on the server only; the browser receives a **short-lived** client secret. Optional: `OPENAI_REALTIME_MODEL`, `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
+- Google Fonts (DM Sans) load via CDN; offline environments fall back to system-ui.
