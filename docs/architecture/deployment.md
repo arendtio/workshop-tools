@@ -5,45 +5,43 @@
 
 ## Goal
 
-The **deployment unit** for this project is a **single Docker image** that runs an **HTTP server** and serves the static UI under `workshop-sandbox/`. There is **no application-level HTTPS** inside the container; operators terminate TLS **outside** this repository (for example with a reverse proxy or platform ingress).
+The **deployment unit** for this project is a **single Docker image** that runs an **HTTP server** and serves the application (today the static UI under `workshop-sandbox/`; later including a backend when that exists). There is **no application-level HTTPS** inside the container; operators terminate TLS **outside** this repository (for example with a reverse proxy or platform ingress).
 
 ## Scope
 
-| In scope | Out of scope (this repo) |
-|----------|---------------------------|
-| `Dockerfile` at repository root | Reverse proxy, certificates, or HTTPS configuration |
-| Image build as part of a deploy pipeline (or local `docker build`) | Pre-publishing images to a registry (optional per environment) |
-| Plain HTTP on a defined container port | mTLS, WAF, or edge routing beyond documenting the HTTP port |
+| In scope (design) | Out of scope (this repo) |
+|-------------------|---------------------------|
+| Target shape: one container, HTTP server, build via image definition when added | Reverse proxy, certificates, or HTTPS configuration |
+| Image build as part of a deploy pipeline once a `Dockerfile` exists | Pre-publishing images to a registry (optional per environment) |
+| Plain HTTP on a defined container port at the workload | mTLS, WAF, or edge routing beyond documenting the HTTP port |
 
-## Container contract
+## Dockerfile and `.dockerignore` (deferred)
 
-1. **Process:** a static file HTTP server serves files from `workshop-sandbox/` (same tree as developed locally).
+A **`Dockerfile`** (and typically **`.dockerignore`**) will be introduced **when the application has enough substance to warrant it**—in particular when there is a **backend** and deployment packaging is meaningful. Until then, this repository **does not** ship those files; local work continues to use a simple static server (see **`AGENTS.md`**).
+
+When added, the image should still follow the contract below (HTTP inside the container, TLS at the edge).
+
+## Container contract (when an image exists)
+
+1. **Process:** an HTTP server serves the deployable assets (static files today; static plus API or other processes once a backend exists).
 2. **Protocol:** **HTTP only** between the reverse proxy (or client) and the container, unless the platform injects TLS in front of the workload without changing this image.
-3. **Port:** the image **exposes TCP port 80** (nginx default). Map it as needed (`docker run -p 8080:80`, Kubernetes `Service`, etc.).
-4. **Build:** the image is produced by **`docker build`** (or equivalent in CI). No separate compile or package-manager build step is required for the current static mock-up.
+3. **Port:** expose a **single well-documented TCP port** for HTTP (conventionally **80** for a static front-end; adjust if the stack uses another port).
+4. **Build:** the image is produced by **`docker build`** (or equivalent in CI). Build steps may grow once backend and assets need compilation or dependency installs.
 
 ## Reverse proxy and HTTPS
 
 HTTPS encryption and certificate lifecycle are **explicitly not** implemented in this project. The expected pattern is:
 
 ```
-[Browser] --HTTPS--> [Reverse proxy / ingress] --HTTP--> [workshop-tools container :80]
+[Browser] --HTTPS--> [Reverse proxy / ingress] --HTTP--> [workshop-tools container :<http-port>]
 ```
 
 The reverse proxy is owned and operated **outside** this codebase; this repository only documents that the container speaks **HTTP** on the exposed port.
 
-## Local verification
+## Local development (current)
 
-Build and run:
-
-```sh
-docker build -t workshop-tools .
-docker run --rm -p 8080:80 workshop-tools
-```
-
-Open `http://localhost:8080` (or the host/port your environment maps to port 80 in the container).
+Until a container image is defined in-repo, use **`AGENTS.md`** (for example `python3 -m http.server` for `workshop-sandbox/`).
 
 ## Related files
 
-- Root **`Dockerfile`** — image definition; build may run in deployment pipelines.
-- **`AGENTS.md`** — local development without Docker (`python3 -m http.server`).
+- **`AGENTS.md`** — local development without Docker.
