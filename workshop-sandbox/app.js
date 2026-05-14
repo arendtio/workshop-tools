@@ -1,8 +1,6 @@
 /**
- * Workshop AI Sandbox — workbench UI mock-up (no backend).
- * Form fields are aligned with current OpenAI platform APIs (see each card’s
- * “API note”) as documented at https://developers.openai.com/api/reference/
- * and related guides (May 2026).
+ * Workshop AI Sandbox — workbench UI (static modules) plus optional Realtime run
+ * when served from the workshop Node server on the same origin.
  */
 
 const INPUT_TYPES = [
@@ -438,13 +436,164 @@ const state = {
   sectionOpen: { input: true, process: true, output: true },
   /** Continuous mock run (no modal) */
   running: false,
+  /** @type {null | 'mock' | 'realtime'} */
+  runMode: null,
 };
+
+/** @type {RTCPeerConnection | null} */
+let realtimePeerConnection = null;
+/** @type {MediaStream | null} */
+let realtimeLocalStream = null;
 
 let idSeq = 0;
 
 function uid() {
   idSeq += 1;
   return `b-${idSeq}`;
+}
+
+function serializePipelinePlan() {
+  return {
+    version: 1,
+    blocks: state.blocks.map((b) => ({
+      id: b.id,
+      role: b.role,
+      typeId: b.typeId,
+      values: { ...(b.values || {}) },
+      formItems: Array.isArray(b.formItems) ? b.formItems.map((it) => ({ ...it })) : undefined,
+      dynamicUiCommitted: b.dynamicUiCommitted,
+    })),
+  };
+}
+
+function pipelineNeedsRealtime() {
+  return state.blocks.some(
+    (b) =>
+      (b.role === "input" && b.typeId === "audio-live") ||
+      (b.role === "output" && b.typeId === "audio-live"),
+  );
+}
+
+async function stopRealtimeRun() {
+  if (realtimeLocalStream) {
+    realtimeLocalStream.getTracks().forEach((t) => t.stop());
+    realtimeLocalStream = null;
+  }
+  if (realtimePeerConnection) {
+    realtimePeerConnection.close();
+    realtimePeerConnection = null;
+  }
+  state.running = false;
+  state.runMode = null;
+  updateRunChrome();
+  lockPalette(false);
+  renderAll();
+}
+
+async function startRealtimeRun() {
+  if (state.running) return;
+  const plan = serializePipelinePlan();
+  try {
+    let res = await fetch("/api/plan/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(plan),
+    });
+    const v = await res.json().catch(() => ({}));
+    if (!res.ok || !v.valid) {
+      const msg =
+        (v.errors && v.errors.map((e) => e.message).join(" ")) || v.message || res.statusText || "Validation failed";
+      showToast(`Validation failed: ${msg}`);
+      return;
+    }
+
+    res = await fetch("/api/realtime/client-secret", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.valid) {
+      const msg =
+        (data.errors && data.errors.map((e) => e.message).join(" ")) ||
+        data.message ||
+        res.statusText ||
+        "Could not mint client secret";
+      showToast(`Realtime: ${msg}`);
+      return;
+    }
+
+    const token = data.client_secret && data.client_secret.value;
+    if (!token) {
+      showToast("Server returned no client secret.");
+      return;
+    }
+    const callsUrl = data.realtime_calls_url;
+
+    const pc = new RTCPeerConnection();
+    realtimePeerConnection = pc;
+
+    const remoteAudio = document.createElement("audio");
+    remoteAudio.autoplay = true;
+    pc.ontrack = (ev) => {
+      remoteAudio.srcObject = ev.streams[0];
+    };
+
+    if (state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live")) {
+      realtimeLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      realtimeLocalStream.getTracks().forEach((track) => pc.addTrack(track, realtimeLocalStream));
+    }
+
+    const dc = pc.createDataChannel("oai-events");
+    dc.addEventListener("message", (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg && msg.type === "error") {
+          console.warn("Realtime error event", msg);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const sdpRes = await fetch(callsUrl, {
+      method: "POST",
+      body: offer.sdp,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/sdp",
+      },
+    });
+    if (!sdpRes.ok) {
+      const t = await sdpRes.text();
+      showToast(`Realtime handshake failed (${sdpRes.status}): ${t.slice(0, 140)}`);
+      await stopRealtimeRun();
+      return;
+    }
+
+    const answer = { type: "answer", sdp: await sdpRes.text() };
+    await pc.setRemoteDescription(answer);
+
+    state.running = true;
+    state.runMode = "realtime";
+    updateRunChrome();
+    lockPalette(true);
+    renderAll();
+    showToast("Realtime session connected — click Running or Esc to stop.");
+  } catch (e) {
+    console.error(e);
+    await stopRealtimeRun();
+    const hint =
+      e && e.name === "NotAllowedError"
+        ? "Microphone permission denied."
+        : e && e.message
+          ? e.message
+          : "Could not start Realtime. Serve the app from the workshop Node server on the same origin (see AGENTS.md).";
+    showToast(hint);
+  }
 }
 
 function findDef(role, typeId) {
@@ -560,7 +709,7 @@ function renderMeta() {
       ? "Nothing in pipeline"
       : `${n} part${n === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output`;
   if (state.running && n > 0) {
-    line += " · mock run active";
+    line += state.runMode === "realtime" ? " · realtime run" : " · mock run active";
   }
   meta.textContent = line;
 
@@ -2145,7 +2294,13 @@ function updateRunChrome() {
   fab.setAttribute("aria-pressed", running ? "true" : "false");
   fab.setAttribute(
     "aria-label",
-    running ? "Mock pipeline is running — click to stop" : "Start mock pipeline run",
+    running
+      ? state.runMode === "realtime"
+        ? "Realtime session active — click to stop"
+        : "Mock pipeline is running — click to stop"
+      : pipelineNeedsRealtime()
+        ? "Validate plan and start Realtime (WebRTC)"
+        : "Start mock pipeline run",
   );
   if (play) {
     play.style.display = running ? "none" : "";
@@ -2158,9 +2313,19 @@ function updateRunChrome() {
   document.body.classList.toggle("pipeline-running", running);
   const st = document.getElementById("status-bar-text");
   if (st) {
-    st.textContent = running
-      ? "Mock run active — edit fields in place; library locked. Click Running or Esc to end."
-      : "Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.";
+    if (running && state.runMode === "realtime") {
+      st.textContent =
+        "Realtime session — WebRTC to OpenAI using an ephemeral client secret from this origin. Click Running or Esc to end.";
+    } else if (running) {
+      st.textContent =
+        "Mock run active — edit fields in place; library locked. Click Running or Esc to end.";
+    } else if (pipelineNeedsRealtime()) {
+      st.textContent =
+        "Live-audio pipeline: Run validates the plan, then opens a Realtime WebRTC session when served from the workshop Node server (same origin).";
+    } else {
+      st.textContent =
+        "Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.";
+    }
   }
 }
 
@@ -2181,6 +2346,7 @@ function startMockRun() {
   state.blocks.forEach((b) => stopBlockCapture(b.id));
   audioLivePttToggleState.clear();
   state.running = true;
+  state.runMode = "mock";
   updateRunChrome();
   lockPalette(true);
   renderAll();
@@ -2191,6 +2357,7 @@ function startMockRun() {
 function stopMockRun() {
   if (!state.running) return;
   state.running = false;
+  state.runMode = null;
   audioLivePttToggleState.clear();
   if (mockRunInterval) {
     clearInterval(mockRunInterval);
@@ -2204,7 +2371,8 @@ function stopMockRun() {
 
 function renderAll() {
   if (!state.blocks.length && state.running) {
-    stopMockRun();
+    if (state.runMode === "realtime") void stopRealtimeRun();
+    else stopMockRun();
   }
   renderMeta();
   renderPalette();
@@ -2212,6 +2380,10 @@ function renderAll() {
 }
 
 function applyPreset(presetId, silent) {
+  if (state.running) {
+    if (state.runMode === "realtime") void stopRealtimeRun();
+    else stopMockRun();
+  }
   state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.blocks = [];
 
@@ -2349,13 +2521,18 @@ function init() {
     btn.addEventListener("click", () => applyPreset(btn.getAttribute("data-preset"), false));
   });
 
-  document.getElementById("fab-run").addEventListener("click", () => {
+  document.getElementById("fab-run").addEventListener("click", async () => {
     if (state.blocks.length === 0) {
       showToast("Pipeline is empty — add modules before a run would make sense.");
       return;
     }
     if (state.running) {
-      stopMockRun();
+      if (state.runMode === "realtime") await stopRealtimeRun();
+      else stopMockRun();
+      return;
+    }
+    if (pipelineNeedsRealtime()) {
+      await startRealtimeRun();
     } else {
       startMockRun();
     }
@@ -2364,11 +2541,16 @@ function init() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.running) {
       e.preventDefault();
-      stopMockRun();
+      if (state.runMode === "realtime") void stopRealtimeRun();
+      else stopMockRun();
     }
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
+    if (state.running) {
+      if (state.runMode === "realtime") void stopRealtimeRun();
+      else stopMockRun();
+    }
     state.blocks.forEach((b) => stopBlockCapture(b.id));
     state.blocks = [];
     renderAll();
