@@ -17,14 +17,10 @@ export function pickVoice(plan) {
   return "marin";
 }
 
-/** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} plan */
-export function pickTurnDetection(plan) {
-  const liveIn = plan.blocks.find((b) => b.role === "input" && b.typeId === "audio-live");
-  if (!liveIn) {
-    return { type: "server_vad", create_response: true };
-  }
-  const tt = String(liveIn.values?.turnTaking ?? "vad");
-  if (tt === "ptt") return null;
+/** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} _plan */
+export function pickTurnDetection(_plan) {
+  // Workshop PTT gates audio in the browser (`MediaStreamTrack.enabled`). OpenAI still uses
+  // server VAD on whatever audio arrives; `turn_detection: null` would require manual commits.
   return { type: "server_vad", create_response: true };
 }
 
@@ -58,6 +54,7 @@ export async function mintRealtimeClientSecret(plan, options = {}) {
   const turn_detection = pickTurnDetection(plan);
   const output_modalities = pickOutputModalities(plan);
 
+  const hasLiveAudioIn = plan.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
   const session = {
     type: "realtime",
     model,
@@ -68,6 +65,11 @@ export async function mintRealtimeClientSecret(plan, options = {}) {
       output: { voice },
     },
   };
+  if (hasLiveAudioIn) {
+    session.audio.input.transcription = {
+      model: process.env.OPENAI_REALTIME_INPUT_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
+    };
+  }
   if (turn_detection === null) {
     session.audio.input.turn_detection = null;
   } else {

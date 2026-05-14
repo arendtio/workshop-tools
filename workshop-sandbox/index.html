@@ -49,14 +49,11 @@
 
         <section class="examples" aria-labelledby="examples-title">
           <h3 id="examples-title">Example layouts</h3>
-          <p class="examples-hint">Load a starter configuration; edit freely.</p>
-          <div class="examples-row">
-            <button type="button" class="chip" data-preset="text-prompt">Text pipeline</button>
-            <button type="button" class="chip" data-preset="vision">Vision + text</button>
-            <button type="button" class="chip" data-preset="live-audio">Live audio</button>
-            <button type="button" class="chip" data-preset="multimodal-out">Multimodal output</button>
-            <button type="button" class="chip" data-preset="form-ui-demo">Form + UI</button>
-          </div>
+          <p class="examples-hint">One list of layouts (starters and your saves). ★ marks what loads on startup; anything can be removed from the list.</p>
+          <button type="button" class="chip chip-save" id="btn-save-custom-layout">
+            Save current pipeline to list…
+          </button>
+          <div id="examples-list" class="examples-list" role="list"></div>
         </section>
       </aside>
 

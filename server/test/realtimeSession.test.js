@@ -36,12 +36,12 @@ describe("realtimeSession helpers", () => {
     ).toBe("sage");
   });
 
-  it("disables server VAD for push-to-talk", () => {
+  it("keeps server VAD for push-to-talk (client mutes the mic)", () => {
     expect(
       pickTurnDetection({
         blocks: [{ role: "input", typeId: "audio-live", values: { turnTaking: "ptt" } }],
       }),
-    ).toBeNull();
+    ).toMatchObject({ type: "server_vad", create_response: true });
     expect(
       pickTurnDetection({
         blocks: [{ role: "input", typeId: "audio-live", values: { turnTaking: "vad" } }],
@@ -51,6 +51,30 @@ describe("realtimeSession helpers", () => {
 });
 
 describe("mintRealtimeClientSecret", () => {
+  it("enables input audio transcription when a live audio input is present", async () => {
+    let body;
+    const fetchImpl = async (url, init) => {
+      body = JSON.parse(String(init.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ value: "ek_test", expires_at: 1 }),
+      };
+    };
+    await mintRealtimeClientSecret(
+      {
+        blocks: [
+          { role: "input", typeId: "audio-live", values: {} },
+          { role: "output", typeId: "text", values: {} },
+        ],
+      },
+      { apiKey: "sk-test", fetchImpl },
+    );
+    expect(body.session.audio.input.transcription).toMatchObject({
+      model: expect.any(String),
+    });
+  });
+
   it("posts to OpenAI client_secrets and returns value", async () => {
     const fetchImpl = async (url, init) => {
       expect(String(url)).toContain("/realtime/client_secrets");

@@ -58,6 +58,63 @@ const OUTPUT_TYPES = [
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
 ];
 
+/** Built-in example pipelines (minimal block list — defaults from `createBlock`). */
+const BUILTIN_PRESETS = {
+  "text-prompt": {
+    label: "Text pipeline",
+    blocks: [
+      { role: "input", typeId: "text" },
+      { role: "process", typeId: "instruction" },
+      { role: "output", typeId: "text" },
+    ],
+  },
+  vision: {
+    label: "Vision + text",
+    blocks: [
+      { role: "input", typeId: "image" },
+      { role: "input", typeId: "text" },
+      { role: "process", typeId: "instruction" },
+      { role: "process", typeId: "vector-db" },
+      { role: "output", typeId: "text" },
+    ],
+  },
+  "live-audio": {
+    label: "Live audio",
+    blocks: [
+      { role: "input", typeId: "audio-live" },
+      { role: "process", typeId: "instruction" },
+      { role: "process", typeId: "tooling" },
+      { role: "output", typeId: "text" },
+      { role: "output", typeId: "audio-live" },
+    ],
+  },
+  "multimodal-out": {
+    label: "Multimodal output",
+    blocks: [
+      { role: "input", typeId: "text" },
+      { role: "input", typeId: "image" },
+      { role: "process", typeId: "instruction" },
+      { role: "process", typeId: "skills" },
+      { role: "output", typeId: "text" },
+      { role: "output", typeId: "image" },
+    ],
+  },
+  "form-ui-demo": {
+    label: "Form + UI",
+    blocks: [
+      { role: "input", typeId: "form" },
+      { role: "input", typeId: "dynamic-ui" },
+      { role: "process", typeId: "instruction" },
+      { role: "output", typeId: "text" },
+      { role: "output", typeId: "form" },
+      { role: "output", typeId: "dynamic-ui" },
+    ],
+  },
+};
+
+const LAYOUT_STORAGE_KEY = "workshop-sandbox-layouts-v1";
+const DEFAULT_BUILTIN_PRESET_ID = "text-prompt";
+
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
 
 /** Voices documented for Speech / modal audio (`/v1/audio/speech`, chat `audio.voice`). */
@@ -83,7 +140,7 @@ const blockMediaStreams = new Map();
 /** @type {Map<string, { recorder: MediaRecorder, chunks: BlobPart[], statusEl: HTMLElement | null }>} */
 const blockMediaRecorders = new Map();
 
-/** Push-to-talk toggle: block id → mic “open” (mock UI only). */
+/** Push-to-talk toggle: block id → mic unmuted (Realtime: syncs to track.enabled). */
 const audioLivePttToggleState = new Map();
 
 /**
@@ -445,6 +502,18 @@ let realtimePeerConnection = null;
 /** @type {MediaStream | null} */
 let realtimeLocalStream = null;
 
+/** Ctrl-hold PTT engaged (hold mode); released on Ctrl keyup, blur, or run stop. */
+let pttCtrlMicEngaged = false;
+/** Sync handles from the last rendered audio-live PTT bar (keyboard shortcuts). */
+let lastAudioLivePttUi = null;
+
+function setRealtimeLocalMicEnabled(enabled) {
+  if (!realtimeLocalStream) return;
+  realtimeLocalStream.getAudioTracks().forEach((t) => {
+    t.enabled = enabled;
+  });
+}
+
 let idSeq = 0;
 
 function uid() {
@@ -474,7 +543,28 @@ function pipelineNeedsRealtime() {
   );
 }
 
+function releasePttCtrlHotkey() {
+  if (!pttCtrlMicEngaged) return;
+  pttCtrlMicEngaged = false;
+  if (lastAudioLivePttUi?.mode === "hold" && typeof lastAudioLivePttUi.setHoldVisual === "function") {
+    try {
+      lastAudioLivePttUi.setHoldVisual(false);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  setRealtimeLocalMicEnabled(false);
+}
+
+function isTypingInField(el) {
+  if (!el || el.nodeType !== 1) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
 async function stopRealtimeRun() {
+  releasePttCtrlHotkey();
   if (realtimeLocalStream) {
     realtimeLocalStream.getTracks().forEach((t) => t.stop());
     realtimeLocalStream = null;
@@ -546,6 +636,13 @@ async function startRealtimeRun() {
     if (state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live")) {
       realtimeLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       realtimeLocalStream.getTracks().forEach((track) => pc.addTrack(track, realtimeLocalStream));
+      const wantsPtt = state.blocks.some(
+        (b) => b.role === "input" && b.typeId === "audio-live" && b.values.turnTaking === "ptt",
+      );
+      if (wantsPtt) {
+        audioLivePttToggleState.clear();
+        setRealtimeLocalMicEnabled(false);
+      }
     }
 
     const dc = pc.createDataChannel("oai-events");
@@ -565,14 +662,7 @@ async function startRealtimeRun() {
       );
     }
     dc.addEventListener("message", (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg && msg.type === "error") {
-          console.warn("Realtime error event", msg);
-        }
-      } catch (_) {
-        /* ignore */
-      }
+      handleRealtimeDataChannelMessage(ev.data);
     });
 
     const offer = await pc.createOffer();
@@ -648,6 +738,334 @@ function createBlock(role, typeId) {
   return block;
 }
 
+function defaultBuiltinEntries() {
+  return Object.keys(BUILTIN_PRESETS).map((presetId) => ({
+    id: `e-bi-${presetId}`,
+    kind: "builtin",
+    presetId,
+  }));
+}
+
+function migrateV1ToV2(data) {
+  const customList = Array.isArray(data.layouts)
+    ? data.layouts.filter((l) => l && typeof l.id === "string" && Array.isArray(l.blocks))
+    : [];
+  const entries = [];
+  for (const presetId of Object.keys(BUILTIN_PRESETS)) {
+    entries.push({ id: `e-bi-${presetId}`, kind: "builtin", presetId });
+  }
+  for (const l of customList) {
+    entries.push({
+      id: l.id,
+      kind: "custom",
+      name: typeof l.name === "string" ? l.name : "Untitled",
+      savedAt: typeof l.savedAt === "string" ? l.savedAt : new Date().toISOString(),
+      blocks: l.blocks,
+    });
+  }
+  let favoriteEntryId = null;
+  const fk = data.favoriteKey;
+  if (typeof fk === "string") {
+    if (fk.startsWith("builtin:")) {
+      const pid = fk.slice("builtin:".length);
+      if (BUILTIN_PRESETS[pid]) favoriteEntryId = `e-bi-${pid}`;
+    } else if (fk.startsWith("custom:")) {
+      const cid = fk.slice("custom:".length);
+      if (customList.some((l) => l.id === cid)) favoriteEntryId = cid;
+    }
+  }
+  return { version: 2, entries, favoriteEntryId };
+}
+
+function normalizeLayoutEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const e of entries) {
+    if (!e || typeof e.id !== "string" || !e.id || seen.has(e.id)) continue;
+    seen.add(e.id);
+    if (e.kind === "builtin") {
+      const presetId = typeof e.presetId === "string" ? e.presetId : "";
+      if (!BUILTIN_PRESETS[presetId]) continue;
+      out.push({ id: e.id, kind: "builtin", presetId });
+    } else if (e.kind === "custom") {
+      if (!Array.isArray(e.blocks)) continue;
+      out.push({
+        id: e.id,
+        kind: "custom",
+        name: typeof e.name === "string" ? e.name : "Untitled",
+        savedAt: typeof e.savedAt === "string" ? e.savedAt : new Date().toISOString(),
+        blocks: e.blocks,
+      });
+    }
+  }
+  return out;
+}
+
+function readLayoutListStore() {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) {
+      return { entries: defaultBuiltinEntries(), favoriteEntryId: null };
+    }
+    const data = JSON.parse(raw);
+    if (!data) {
+      return { entries: defaultBuiltinEntries(), favoriteEntryId: null };
+    }
+    if (data.version === 1) {
+      const migrated = migrateV1ToV2(data);
+      try {
+        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(migrated));
+      } catch (e) {
+        console.warn("Could not persist migrated layout store", e);
+      }
+      return {
+        entries: normalizeLayoutEntries(migrated.entries),
+        favoriteEntryId: typeof migrated.favoriteEntryId === "string" ? migrated.favoriteEntryId : null,
+      };
+    }
+    if (data.version === 2 && Array.isArray(data.entries)) {
+      return {
+        entries: normalizeLayoutEntries(data.entries),
+        favoriteEntryId: typeof data.favoriteEntryId === "string" ? data.favoriteEntryId : null,
+      };
+    }
+    return { entries: defaultBuiltinEntries(), favoriteEntryId: null };
+  } catch {
+    return { entries: defaultBuiltinEntries(), favoriteEntryId: null };
+  }
+}
+
+function writeLayoutListStore(entries, favoriteEntryId) {
+  const normalized = normalizeLayoutEntries(entries);
+  const ids = new Set(normalized.map((e) => e.id));
+  let fav = favoriteEntryId;
+  if (fav && !ids.has(fav)) fav = null;
+  try {
+    localStorage.setItem(
+      LAYOUT_STORAGE_KEY,
+      JSON.stringify({ version: 2, entries: normalized, favoriteEntryId: fav }),
+    );
+  } catch (e) {
+    console.warn("Could not save layouts to localStorage", e);
+    showToast("Could not save — storage may be full or disabled.");
+  }
+}
+
+function entryLabel(entry) {
+  if (entry.kind === "builtin") {
+    const def = BUILTIN_PRESETS[entry.presetId];
+    return def ? def.label : entry.presetId;
+  }
+  return entry.name || "Untitled";
+}
+
+function applyEntry(entry, silent) {
+  if (!entry) return false;
+  if (entry.kind === "builtin") {
+    if (!BUILTIN_PRESETS[entry.presetId]) return false;
+    applyBuiltinPreset(entry.presetId, silent);
+    return true;
+  }
+  if (entry.kind === "custom") {
+    if (!Array.isArray(entry.blocks)) return false;
+    if (!restorePipelineFromSnapshot(entry.blocks)) return false;
+    if (!silent) showToast(`Loaded “${entry.name || "Saved layout"}”.`);
+    return true;
+  }
+  return false;
+}
+
+function applyInitialPageLayout() {
+  const { entries, favoriteEntryId } = readLayoutListStore();
+  if (favoriteEntryId) {
+    const fav = entries.find((e) => e.id === favoriteEntryId);
+    if (fav && applyEntry(fav, true)) return;
+  }
+  if (entries.length) {
+    if (applyEntry(entries[0], true)) return;
+  }
+  applyBuiltinPreset(DEFAULT_BUILTIN_PRESET_ID, true);
+}
+
+function renderExamplesSection() {
+  const host = document.getElementById("examples-list");
+  if (!host) return;
+  host.innerHTML = "";
+  const { entries, favoriteEntryId } = readLayoutListStore();
+
+  if (!entries.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "examples-empty-block";
+    const p = document.createElement("p");
+    p.className = "examples-empty";
+    p.textContent = "No layouts in the list.";
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "chip chip-restore";
+    restore.textContent = "Restore default example layouts";
+    restore.addEventListener("click", () => {
+      writeLayoutListStore(defaultBuiltinEntries(), null);
+      renderExamplesSection();
+      showToast("Default example layouts restored.");
+    });
+    wrap.appendChild(p);
+    wrap.appendChild(restore);
+    host.appendChild(wrap);
+    return;
+  }
+
+  for (const entry of entries) {
+    const label = entryLabel(entry);
+    const isFav = favoriteEntryId === entry.id;
+    const row = document.createElement("div");
+    row.className = "examples-item";
+    row.setAttribute("role", "listitem");
+
+    const loadBtn = document.createElement("button");
+    loadBtn.type = "button";
+    loadBtn.className = "chip examples-item-load";
+    loadBtn.textContent = label;
+    loadBtn.addEventListener("click", () => {
+      if (!applyEntry(entry, false)) {
+        showToast("That layout could not be loaded.");
+        renderExamplesSection();
+      }
+    });
+
+    row.appendChild(loadBtn);
+
+    const favBtn = document.createElement("button");
+    favBtn.type = "button";
+    favBtn.className = "examples-item-fav";
+    favBtn.setAttribute("aria-label", isFav ? "Remove as startup layout" : "Set as startup layout");
+    favBtn.title = isFav
+      ? "Startup layout — loads when you open this page (click to clear)"
+      : "Load this pipeline when you open the page";
+    favBtn.textContent = "★";
+    favBtn.classList.toggle("is-favorite", isFav);
+    favBtn.addEventListener("click", () => {
+      const cur = readLayoutListStore();
+      const nextFav = cur.favoriteEntryId === entry.id ? null : entry.id;
+      writeLayoutListStore(cur.entries, nextFav);
+      renderExamplesSection();
+      showToast(
+        nextFav
+          ? "Startup layout saved — this pipeline opens automatically next visit."
+          : "Startup layout cleared — the first list item loads next time (or the text example if the list is empty).",
+      );
+    });
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "examples-item-del";
+    delBtn.setAttribute("aria-label", "Remove from list");
+    delBtn.title = "Remove from list";
+    delBtn.textContent = "×";
+    delBtn.addEventListener("click", () => {
+      if (!confirm(`Remove “${label}” from the list?`)) return;
+      const cur = readLayoutListStore();
+      const nextFav = cur.favoriteEntryId === entry.id ? null : cur.favoriteEntryId;
+      const nextEntries = cur.entries.filter((e) => e.id !== entry.id);
+      writeLayoutListStore(nextEntries, nextFav);
+      renderExamplesSection();
+      showToast("Removed from list.");
+    });
+
+    row.appendChild(favBtn);
+    row.appendChild(delBtn);
+    host.appendChild(row);
+  }
+}
+
+function saveCurrentPipelineToStore() {
+  const namePrompt = () => {
+    const d = new Date();
+    const fallback = `Layout ${d.toLocaleString()}`;
+    const entered = window.prompt("Name for this layout:", fallback);
+    if (entered === null) return null;
+    const t = entered.trim();
+    return t || fallback;
+  };
+  const name = namePrompt();
+  if (name === null) return;
+  const cur = readLayoutListStore();
+  const newEntry = {
+    id: `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: "custom",
+    name,
+    savedAt: new Date().toISOString(),
+    blocks: serializePipelineSnapshot(state.blocks),
+  };
+  writeLayoutListStore([...cur.entries, newEntry], cur.favoriteEntryId);
+  renderExamplesSection();
+  showToast("Pipeline saved to this browser.");
+}
+
+/** @param {typeof state.blocks} blocks */
+function serializePipelineSnapshot(blocks) {
+  return blocks.map((b) => {
+    const row = { role: b.role, typeId: b.typeId, values: { ...(b.values || {}) } };
+    if (Array.isArray(b.formItems)) row.formItems = JSON.parse(JSON.stringify(b.formItems));
+    if (b.dynamicUiCommitted != null) row.dynamicUiCommitted = String(b.dynamicUiCommitted);
+    return row;
+  });
+}
+
+function isValidRole(r) {
+  return r === "input" || r === "process" || r === "output";
+}
+
+/** @param {ReturnType<typeof serializePipelineSnapshot>} rows */
+function restorePipelineFromSnapshot(rows) {
+  if (!Array.isArray(rows)) return false;
+  for (const row of rows) {
+    if (!row || !isValidRole(row.role) || typeof row.typeId !== "string" || !row.typeId.trim()) return false;
+  }
+  if (state.running) {
+    if (state.runMode === "realtime") void stopRealtimeRun();
+    else stopMockRun();
+  }
+  state.blocks.forEach((b) => stopBlockCapture(b.id));
+  state.blocks = [];
+  audioLivePttToggleState.clear();
+  for (const row of rows) {
+    const block = createBlock(row.role, row.typeId);
+    if (row.values && typeof row.values === "object") {
+      block.values = { ...block.values, ...row.values };
+    }
+    if (Array.isArray(row.formItems)) {
+      block.formItems = JSON.parse(JSON.stringify(row.formItems));
+    }
+    if (row.dynamicUiCommitted != null) {
+      block.dynamicUiCommitted = String(row.dynamicUiCommitted);
+    }
+    state.blocks.push(block);
+  }
+  renderAll();
+  return true;
+}
+
+function applyBuiltinPreset(presetId, silent) {
+  const p = BUILTIN_PRESETS[presetId];
+  if (!p) return false;
+  if (state.running) {
+    if (state.runMode === "realtime") void stopRealtimeRun();
+    else stopMockRun();
+  }
+  state.blocks.forEach((b) => stopBlockCapture(b.id));
+  state.blocks = [];
+  audioLivePttToggleState.clear();
+  p.blocks.forEach((b) => {
+    state.blocks.push(createBlock(b.role, b.typeId));
+  });
+  renderAll();
+  if (!silent) {
+    showToast("Example pipeline loaded — forms are editable; nothing executes for real.");
+  }
+  return true;
+}
+
 function stopBlockMedia(blockId) {
   const stream = blockMediaStreams.get(blockId);
   if (!stream) return;
@@ -693,6 +1111,7 @@ function renderPalette() {
   fillPalette("palette-inputs", INPUT_TYPES, "input");
   fillPalette("palette-process", PROCESS_TYPES, "process");
   fillPalette("palette-output", OUTPUT_TYPES, "output");
+  renderExamplesSection();
 }
 
 function fillPalette(containerId, types, role) {
@@ -1230,7 +1649,8 @@ function renderOutputTextConversationPreview(block, card) {
 
   const lead = document.createElement("div");
   lead.className = "output-chat-lede";
-  lead.textContent = "Chat preview (mock)";
+  lead.textContent =
+    state.runMode === "realtime" && state.running ? "Live session log" : "Chat preview (mock)";
   thread.appendChild(lead);
 
   if (!snap.systemParts.length) {
@@ -1263,7 +1683,10 @@ function renderOutputTextConversationPreview(block, card) {
   ta.readOnly = true;
   ta.setAttribute("data-run-preview-block", block.id);
   ta.rows = 5;
-  ta.placeholder = "Run the pipeline to simulate a reply here.";
+  ta.placeholder =
+    state.runMode === "realtime" && state.running
+      ? "Completed transcripts from the live session appear here (not streamed deltas)."
+      : "Run the pipeline to simulate a reply here.";
   ta.value = block.runPreview || "";
   bubble.appendChild(ta);
 
@@ -1929,8 +2352,12 @@ function renderDynamicUiModule(block, card) {
   card.appendChild(body);
 }
 
+const PTT_ICON_MIC_LIVE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/><path d="M8 22h8"/></svg>`;
+
+const PTT_ICON_MIC_MUTED = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.84 18.84A8 8 0 0 1 5 15H3a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2h1"/><path d="M10.37 10.37a5 5 0 0 0-1.17 3.13V15"/><path d="M15 15v-3a5 5 0 0 0-.91-2.84"/><path d="M9 9v-1a3 3 0 0 1 5.12-2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
+
 /**
- * Mock push-to-talk: control stays disabled until a pipeline run is active.
+ * Push-to-talk: toggles the outgoing Realtime mic track (`enabled`). Mock runs have no capture stream — UI only.
  */
 function renderAudioLivePttBar(block, card) {
   const wrap = document.createElement("div");
@@ -1944,28 +2371,55 @@ function renderAudioLivePttBar(block, card) {
   hint.className = "field-hint ptt-live-hint";
 
   const running = state.running;
+  const liveMic = state.runMode === "realtime" && realtimeLocalStream;
   const isHold = block.values.pttStyle !== "toggle";
 
   if (!running) {
     hint.textContent = isHold
-      ? "Start a run to use the button. Then hold it while you speak (mock — no audio is sent)."
-      : "Start a run to use the button. Then press to open the mic and press again to close (mock — no audio is sent).";
-  } else {
+      ? "Start a run to use the button. Hold while speaking."
+      : "Start a run to use the button. Press to unmute the mic, press again to mute.";
+  } else if (liveMic) {
     hint.textContent = isHold
-      ? "Hold while speaking. Release to stop (mock)."
-      : "Press once to open the mic, press again to close (mock).";
+      ? "Hold to unmute the microphone; release to mute again. While running, holding Ctrl does the same."
+      : "Press to unmute the microphone; press again to mute. While running, Ctrl toggles the same way.";
+  } else {
+    hint.textContent = "Mock run: practice only — no microphone track. Ctrl still mirrors the button while running.";
   }
 
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "ptt-live-btn";
   btn.disabled = !running;
+  btn.setAttribute("aria-pressed", "false");
+  btn.setAttribute("aria-label", isHold ? "Hold to speak — microphone live while pressed" : "Push to talk — toggle microphone");
+  const iconWrap = document.createElement("span");
+  iconWrap.className = "ptt-live-btn-icon";
+  const labelEl = document.createElement("span");
+  labelEl.className = "ptt-live-btn-label";
+  btn.appendChild(iconWrap);
+  btn.appendChild(labelEl);
+
+  const setIcon = (kind) => {
+    iconWrap.innerHTML = kind === "live" ? PTT_ICON_MIC_LIVE : PTT_ICON_MIC_MUTED;
+  };
 
   if (isHold) {
-    btn.textContent = "Hold to speak";
+    const setHoldVisual = (transmitting) => {
+      btn.classList.toggle("is-transmitting", transmitting);
+      btn.setAttribute("aria-pressed", transmitting ? "true" : "false");
+      if (transmitting) {
+        setIcon("live");
+        labelEl.textContent = "Live — speaking";
+      } else {
+        setIcon("muted");
+        labelEl.textContent = "Hold to speak";
+      }
+    };
+    setHoldVisual(false);
     if (running) {
       const release = () => {
-        btn.classList.remove("is-transmitting");
+        setHoldVisual(false);
+        if (liveMic) setRealtimeLocalMicEnabled(false);
       };
       btn.addEventListener("pointerdown", (e) => {
         if (e.button !== 0 || btn.disabled) return;
@@ -1975,18 +2429,27 @@ function renderAudioLivePttBar(block, card) {
         } catch (_) {
           /* ignore */
         }
-        btn.classList.add("is-transmitting");
+        setHoldVisual(true);
+        if (liveMic) setRealtimeLocalMicEnabled(true);
       });
       btn.addEventListener("pointerup", release);
       btn.addEventListener("pointercancel", release);
       btn.addEventListener("lostpointercapture", release);
     }
+    lastAudioLivePttUi = { mode: "hold", setHoldVisual, liveMic };
   } else {
     const syncToggleUi = () => {
       const on = audioLivePttToggleState.get(block.id) === true;
-      btn.textContent = on ? "Stop speaking" : "Start speaking";
       btn.classList.toggle("is-transmitting", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (on) {
+        setIcon("live");
+        labelEl.textContent = "Live — tap to mute";
+      } else {
+        setIcon("muted");
+        labelEl.textContent = "Tap to unmute";
+      }
+      if (liveMic) setRealtimeLocalMicEnabled(on);
     };
     syncToggleUi();
     if (running) {
@@ -1995,6 +2458,7 @@ function renderAudioLivePttBar(block, card) {
         syncToggleUi();
       });
     }
+    lastAudioLivePttUi = { mode: "toggle", syncToggle: syncToggleUi, blockId: block.id, liveMic };
   }
 
   wrap.appendChild(title);
@@ -2252,6 +2716,7 @@ function renderEditorSection(role, list, root) {
 }
 
 function renderModuleEditor() {
+  lastAudioLivePttUi = null;
   const root = document.getElementById("module-editor");
   root.innerHTML = "";
 
@@ -2274,6 +2739,63 @@ function renderModuleEditor() {
 }
 
 let mockRunInterval = null;
+
+/**
+ * Append finalized Realtime transcript chunks to every text output module (assistant pane).
+ * @param {"user-voice" | "assistant-voice" | "assistant-text"} kind
+ * @param {string} text
+ */
+function appendRealtimeTranscriptToTextOutputs(kind, text) {
+  const body = String(text || "").trim();
+  if (!body) return;
+  const label =
+    kind === "user-voice"
+      ? "You (voice)"
+      : kind === "assistant-voice"
+        ? "Assistant (voice)"
+        : "Assistant (text)";
+  const blockText = `\n── ${label} ──\n${body}\n`;
+  const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  if (!textTargets.length) return;
+  if (textTargets.length === 1) {
+    const prev = (textTargets[0].runPreview || "").trim();
+    textTargets[0].runPreview = prev ? `${prev}\n${blockText.trimEnd()}` : blockText.trimStart();
+  } else {
+    const chunk = blockText.trimEnd();
+    textTargets.forEach((b) => {
+      const prev = (b.runPreview || "").trim();
+      b.runPreview = prev ? `${prev}\n${chunk}` : chunk;
+    });
+  }
+  syncOutputPreviewFieldsFromState();
+}
+
+function handleRealtimeDataChannelMessage(raw) {
+  if (state.runMode !== "realtime" || !state.running) return;
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!msg || typeof msg.type !== "string") return;
+  if (msg.type === "error") {
+    console.warn("Realtime error event", msg);
+    return;
+  }
+  if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
+    appendRealtimeTranscriptToTextOutputs("user-voice", msg.transcript);
+    return;
+  }
+  if (msg.type === "response.output_audio_transcript.done" && msg.transcript) {
+    appendRealtimeTranscriptToTextOutputs("assistant-voice", msg.transcript);
+    return;
+  }
+  if (msg.type === "response.output_text.done" && msg.text) {
+    appendRealtimeTranscriptToTextOutputs("assistant-text", msg.text);
+    return;
+  }
+}
 
 function injectRunPreviewIntoOutputs(previewText) {
   const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
@@ -2353,6 +2875,8 @@ function lockPalette(locked) {
   if (pal) pal.classList.toggle("palette-locked", locked);
   const clearBtn = document.getElementById("btn-clear");
   if (clearBtn) clearBtn.disabled = locked;
+  const saveLay = document.getElementById("btn-save-custom-layout");
+  if (saveLay) saveLay.disabled = locked;
 }
 
 function applyRunTick() {
@@ -2375,6 +2899,7 @@ function startMockRun() {
 
 function stopMockRun() {
   if (!state.running) return;
+  releasePttCtrlHotkey();
   state.running = false;
   state.runMode = null;
   audioLivePttToggleState.clear();
@@ -2396,75 +2921,6 @@ function renderAll() {
   renderMeta();
   renderPalette();
   renderModuleEditor();
-}
-
-function applyPreset(presetId, silent) {
-  if (state.running) {
-    if (state.runMode === "realtime") void stopRealtimeRun();
-    else stopMockRun();
-  }
-  state.blocks.forEach((b) => stopBlockCapture(b.id));
-  state.blocks = [];
-
-  const presets = {
-    "text-prompt": {
-      blocks: [
-        { role: "input", typeId: "text" },
-        { role: "process", typeId: "instruction" },
-        { role: "output", typeId: "text" },
-      ],
-    },
-    vision: {
-      blocks: [
-        { role: "input", typeId: "image" },
-        { role: "input", typeId: "text" },
-        { role: "process", typeId: "instruction" },
-        { role: "process", typeId: "vector-db" },
-        { role: "output", typeId: "text" },
-      ],
-    },
-    "live-audio": {
-      blocks: [
-        { role: "input", typeId: "audio-live" },
-        { role: "process", typeId: "instruction" },
-        { role: "process", typeId: "tooling" },
-        { role: "output", typeId: "text" },
-        { role: "output", typeId: "audio-live" },
-      ],
-    },
-    "multimodal-out": {
-      blocks: [
-        { role: "input", typeId: "text" },
-        { role: "input", typeId: "image" },
-        { role: "process", typeId: "instruction" },
-        { role: "process", typeId: "skills" },
-        { role: "output", typeId: "text" },
-        { role: "output", typeId: "image" },
-      ],
-    },
-    "form-ui-demo": {
-      blocks: [
-        { role: "input", typeId: "form" },
-        { role: "input", typeId: "dynamic-ui" },
-        { role: "process", typeId: "instruction" },
-        { role: "output", typeId: "text" },
-        { role: "output", typeId: "form" },
-        { role: "output", typeId: "dynamic-ui" },
-      ],
-    },
-  };
-
-  const p = presets[presetId];
-  if (!p) return;
-
-  p.blocks.forEach((b) => {
-    state.blocks.push(createBlock(b.role, b.typeId));
-  });
-
-  renderAll();
-  if (!silent) {
-    showToast("Example pipeline loaded — forms are editable; nothing executes for real.");
-  }
 }
 
 function showToast(message) {
@@ -2535,34 +2991,90 @@ function buildMockPreview(blocks) {
   return lines.join("\n");
 }
 
+async function toggleRunFromFab() {
+  if (state.blocks.length === 0) {
+    showToast("Pipeline is empty — add modules before a run would make sense.");
+    return;
+  }
+  if (state.running) {
+    if (state.runMode === "realtime") await stopRealtimeRun();
+    else stopMockRun();
+    return;
+  }
+  if (pipelineNeedsRealtime()) {
+    await startRealtimeRun();
+  } else {
+    startMockRun();
+  }
+}
+
+async function startRunFromHotkey() {
+  if (state.running) return;
+  if (state.blocks.length === 0) {
+    showToast("Pipeline is empty — add modules before a run would make sense.");
+    return;
+  }
+  if (pipelineNeedsRealtime()) {
+    await startRealtimeRun();
+  } else {
+    startMockRun();
+  }
+}
+
 function init() {
-  document.querySelectorAll("[data-preset]").forEach((btn) => {
-    btn.addEventListener("click", () => applyPreset(btn.getAttribute("data-preset"), false));
+  document.getElementById("btn-save-custom-layout").addEventListener("click", () => {
+    saveCurrentPipelineToStore();
   });
 
-  document.getElementById("fab-run").addEventListener("click", async () => {
-    if (state.blocks.length === 0) {
-      showToast("Pipeline is empty — add modules before a run would make sense.");
-      return;
-    }
-    if (state.running) {
-      if (state.runMode === "realtime") await stopRealtimeRun();
-      else stopMockRun();
-      return;
-    }
-    if (pipelineNeedsRealtime()) {
-      await startRealtimeRun();
-    } else {
-      startMockRun();
-    }
+  document.getElementById("fab-run").addEventListener("click", () => {
+    void toggleRunFromFab();
   });
 
-  document.addEventListener("keydown", (e) => {
+  document.addEventListener("keydown", async (e) => {
     if (e.key === "Escape" && state.running) {
       e.preventDefault();
       if (state.runMode === "realtime") void stopRealtimeRun();
       else stopMockRun();
+      return;
     }
+
+    if (isTypingInField(e.target)) return;
+
+    if (e.altKey && e.key === "Enter" && !state.running) {
+      e.preventDefault();
+      await startRunFromHotkey();
+      return;
+    }
+
+    if (!state.running || !lastAudioLivePttUi) return;
+    const pttBlock = state.blocks.find(
+      (b) => b.role === "input" && b.typeId === "audio-live" && b.values.turnTaking === "ptt",
+    );
+    if (!pttBlock) return;
+
+    const isCtrl = e.code === "ControlLeft" || e.code === "ControlRight";
+    if (!isCtrl || e.repeat) return;
+
+    if (lastAudioLivePttUi.mode === "hold") {
+      if (pttCtrlMicEngaged) return;
+      pttCtrlMicEngaged = true;
+      lastAudioLivePttUi.setHoldVisual(true);
+      if (lastAudioLivePttUi.liveMic) setRealtimeLocalMicEnabled(true);
+    } else {
+      audioLivePttToggleState.set(pttBlock.id, !audioLivePttToggleState.get(pttBlock.id));
+      lastAudioLivePttUi.syncToggle();
+    }
+  });
+
+  document.addEventListener("keyup", (e) => {
+    if (!pttCtrlMicEngaged || !lastAudioLivePttUi || lastAudioLivePttUi.mode !== "hold") return;
+    if (e.code !== "ControlLeft" && e.code !== "ControlRight") return;
+    if (e.getModifierState("Control")) return;
+    releasePttCtrlHotkey();
+  });
+
+  window.addEventListener("blur", () => {
+    releasePttCtrlHotkey();
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
@@ -2576,7 +3088,7 @@ function init() {
     showToast("Pipeline cleared.");
   });
 
-  applyPreset("text-prompt", true);
+  applyInitialPageLayout();
   updateRunChrome();
 
   if (location.hash === "#demo-shot") {
