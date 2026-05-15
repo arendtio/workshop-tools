@@ -20,4 +20,8 @@ export const pipelineBlockSchema = z.object({
 export const pipelinePlanSchema = z.object({
   version: z.literal(1),
   blocks: z.array(pipelineBlockSchema),
+  /** Client/server workshop run — persisted mock tooling DB (in-memory on server). */
+  toolingMockSessionId: z.string().min(1).optional(),
+  /** Client/server — persisted dynamic UI widget snapshot + NL hints. */
+  dynamicUiSessionId: z.string().min(1).optional(),
 });

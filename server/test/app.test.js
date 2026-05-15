@@ -3,6 +3,8 @@ import { fileURLToPath } from "url";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
+import { createMockToolingSession } from "../src/mockToolingStore.js";
+import { createDynamicUiSession } from "../src/dynamicUiSessionStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticRoot = path.join(__dirname, "..", "..", "workshop-sandbox");
@@ -229,5 +231,41 @@ describe("HTTP API", () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(String(res.body.data_url)).toMatch(/^data:audio\/mpeg;base64,/);
+  });
+
+  it("POST /api/workshop-session/tooling-mock persists mutations per session", async () => {
+    const sid = createMockToolingSession();
+    const app = createApp({ staticRoot });
+    const r2 = await request(app)
+      .post("/api/workshop-session/tooling-mock")
+      .send({
+        session_id: sid,
+        call: { domain: "customers", operation: "update", id: "cust-001", record: { city: "Köln" } },
+      });
+    expect(r2.status).toBe(200);
+    expect(r2.body.ok).toBe(true);
+    const r3 = await request(app)
+      .post("/api/workshop-session/tooling-mock")
+      .send({ session_id: sid, call: { domain: "customers", operation: "get", id: "cust-001" } });
+    expect(r3.body.data.city).toBe("Köln");
+  });
+
+  it("POST /api/workshop-session/dynamic-ui patches and reads state", async () => {
+    const sid = createDynamicUiSession();
+    const app = createApp({ staticRoot });
+    const p = await request(app)
+      .post("/api/workshop-session/dynamic-ui")
+      .send({
+        action: "patch",
+        session_id: sid,
+        patch: { nlPrompt: "sliders", widgets: { "slider:A": "12" } },
+      });
+    expect(p.status).toBe(200);
+    expect(p.body.ok).toBe(true);
+    const r = await request(app)
+      .post("/api/workshop-session/dynamic-ui")
+      .send({ action: "read", session_id: sid });
+    expect(r.body.state.nlPrompt).toBe("sliders");
+    expect(r.body.state.widgets["slider:A"]).toBe("12");
   });
 });

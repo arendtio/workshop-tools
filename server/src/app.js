@@ -6,8 +6,29 @@ import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
 import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./realtimeSession.js";
 import { generateWorkshopImageFromPlan } from "./imageGeneration.js";
 import { generateWorkshopSpeechFromPlan } from "./speechGeneration.js";
+import { createMockToolingSession, hasMockToolingSession, runMockToolingCall } from "./mockToolingStore.js";
+import {
+  createDynamicUiSession,
+  hasDynamicUiSession,
+  patchDynamicUiSession,
+  readDynamicUiSession,
+} from "./dynamicUiSessionStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * @param {{ blocks: { role: string, typeId: string }[] }} plan
+ */
+function planHasProcessTooling(plan) {
+  return plan.blocks.some((b) => b.role === "process" && b.typeId === "tooling");
+}
+
+/**
+ * @param {{ blocks: { role: string, typeId: string }[] }} plan
+ */
+function planUsesDynamicUiModule(plan) {
+  return plan.blocks.some((b) => b.typeId === "dynamic-ui");
+}
 
 /**
  * @param {{ staticRoot: string }} opts
@@ -46,16 +67,36 @@ export function createApp(opts) {
     try {
       const secret = await mintRealtimeClientSecret(result.plan);
       const base = (process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
-      const client_events = buildRealtimeBootstrapClientEvents(result.plan);
-      const post_connect_session = buildRealtimePostConnectSession(result.plan);
-      return res.json({
+
+      let toolingMockSessionId;
+      if (planHasProcessTooling(result.plan)) {
+        toolingMockSessionId = createMockToolingSession();
+      }
+      let dynamicUiSessionId;
+      if (planUsesDynamicUiModule(result.plan)) {
+        dynamicUiSessionId = createDynamicUiSession();
+      }
+
+      /** @type {Record<string, unknown>} */
+      const planForSession = { ...result.plan };
+      if (toolingMockSessionId) planForSession.toolingMockSessionId = toolingMockSessionId;
+      if (dynamicUiSessionId) planForSession.dynamicUiSessionId = dynamicUiSessionId;
+
+      const client_events = buildRealtimeBootstrapClientEvents(planForSession);
+      const post_connect_session = buildRealtimePostConnectSession(planForSession);
+
+      /** @type {Record<string, unknown>} */
+      const payload = {
         valid: true,
         mode: "realtime",
         client_secret: { value: secret.value, expires_at: secret.expires_at },
         realtime_calls_url: `${base}/realtime/calls`,
         post_connect_session,
         orchestration: { version: 1, client_events },
-      });
+      };
+      if (toolingMockSessionId) payload.tooling_mock_session_id = toolingMockSessionId;
+      if (dynamicUiSessionId) payload.dynamic_ui_session_id = dynamicUiSessionId;
+      return res.json(payload);
     } catch (e) {
       const st = typeof e.status === "number" ? e.status : NaN;
       const status = st >= 400 && st < 600 ? st : 502;
@@ -140,6 +181,30 @@ export function createApp(opts) {
         message: e.message || "Speech synthesis failed.",
       });
     }
+  });
+
+  app.post("/api/workshop-session/tooling-mock", (req, res) => {
+    const sessionId = String(req.body?.session_id || "").trim();
+    const call = req.body?.call && typeof req.body.call === "object" ? req.body.call : req.body;
+    if (!hasMockToolingSession(sessionId)) {
+      return res.status(404).json({ ok: false, error: "unknown_session" });
+    }
+    const out = runMockToolingCall(sessionId, call);
+    return res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.post("/api/workshop-session/dynamic-ui", (req, res) => {
+    const sessionId = String(req.body?.session_id || "").trim();
+    const action = String(req.body?.action || "patch").trim().toLowerCase();
+    if (action === "read") {
+      const r = readDynamicUiSession(sessionId);
+      if (!r.ok) return res.status(404).json(r);
+      return res.json(r);
+    }
+    const patch = req.body?.patch && typeof req.body.patch === "object" ? req.body.patch : {};
+    const r = patchDynamicUiSession(sessionId, patch);
+    if (!r.ok) return res.status(404).json(r);
+    return res.json(r);
   });
 
   app.use(express.static(staticRoot, { extensions: ["html"] }));

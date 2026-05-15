@@ -88,8 +88,9 @@ export function buildFullRealtimeInstructions(plan) {
     const op = TOOLING_ACCESS_LABEL[mode] ?? mode;
     const domain = TOOLING_DOMAIN_LABEL[dom] ?? dom;
     parts.push(
-      `Tooling (workshop stub): treat workshop data access intent as "${op}" scoped to "${domain}". ` +
-        `Wire real tools server-side; do not invent private data.`,
+      `Tooling (workshop mock): treat data access intent as "${op}" scoped to "${domain}". ` +
+        `The Realtime tool \`workshop_mock_tooling_call\` exposes a small in-memory customers / orders / shop / inventory dataset that **persists for this run** (session id is injected server-side when the client secret is minted). ` +
+        `Use list/get/create/update/delete on the matching domain; do not invent private production data.`,
     );
   }
 

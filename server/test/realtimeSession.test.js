@@ -139,6 +139,24 @@ describe("buildRealtimePostConnectSession", () => {
     expect(names).toContain("workshop_emit_dynamic_ui");
     expect(names).not.toContain("workshop_generate_image");
   });
+
+  it("registers mock tooling + dynamic UI tools when session ids are present on the plan", () => {
+    const session = buildRealtimePostConnectSession({
+      version: 1,
+      toolingMockSessionId: "mock-sess-1",
+      dynamicUiSessionId: "dyn-sess-1",
+      blocks: [
+        { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
+        { id: "2", role: "process", typeId: "tooling", values: { accessMode: "read", serviceDomain: "customers" } },
+        { id: "3", role: "input", typeId: "dynamic-ui", values: { uiPrompt: "sliders" } },
+        { id: "4", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    const names = session.tools?.map((t) => t.name) ?? [];
+    expect(names).toContain("workshop_mock_tooling_call");
+    expect(names).toContain("workshop_dynamic_ui_read_state");
+    expect(names).toContain("workshop_dynamic_ui_apply_data");
+  });
 });
 
 describe("mintRealtimeClientSecret", () => {

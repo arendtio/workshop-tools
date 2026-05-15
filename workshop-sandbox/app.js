@@ -374,7 +374,7 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Stub-Werte für den Workshop; die echte Implementierung übersetzt Vorgang und Service in konkrete Endpunkte oder Tools.",
+        hint: "Mock tool `workshop_mock_tooling_call` + in-memory tables (customers, orders, shop, inventory) persist for each Run; access mode and domain are hints for the model.",
       },
     ],
   },
@@ -411,7 +411,7 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "Natural-language UI spec → rendered widgets in your host app (charts, sliders, matrices). Prompt + regen are UI-only mocks here.",
+      "NL UI spec → lightweight mock preview (sliders/matrix). During a Realtime run, interactive widgets PATCH server state so `workshop_dynamic_ui_read_state` returns participant values.",
     defaults: {
       uiPrompt: "Drei Slider für Budget, Risiko und Zufriedenheit (je 0–100).",
     },
@@ -425,7 +425,7 @@ const FORM_SCHEMA = {
   },
   "output:dynamic-ui": {
     apiMapping:
-      "Realtime tool `workshop_emit_dynamic_ui` refreshes the preview; manual prompt + mock regen still work offline.",
+      "Realtime `workshop_emit_dynamic_ui` updates the output preview. With any dynamic-ui module, `workshop_dynamic_ui_read_state` / `workshop_dynamic_ui_apply_data` read or merge NL + widget values persisted for this run (participant sliders sync when a session exists).",
     defaults: {
       uiPrompt: "Ein Balkendiagramm mit vier Balken für Q1–Q4 (Demo-Zahlen).",
     },
@@ -507,6 +507,15 @@ let realtimeLocalStream = null;
 /** @type {RTCDataChannel | null} */
 let realtimeDataChannel = null;
 /**
+ * Minted with `/api/realtime/client-secret` — mock tooling DB + dynamic UI widget persistence (this run).
+ * @type {{ toolingMockSessionId?: string, dynamicUiSessionId?: string } | null}
+ */
+let workshopSessionIds = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let dynamicUiWidgetSyncTimer = null;
+/** @type {Record<string, string> | null} */
+let pendingDynamicUiWidgetPatch = null;
+/**
  * When true, a completed model `response.done` ends the run (pipelines without live mic input).
  * Live microphone pipelines stay running until the user stops them.
  */
@@ -548,7 +557,8 @@ function uid() {
 }
 
 function serializePipelinePlan() {
-  return {
+  /** @type {{ version: 1, blocks: object[], toolingMockSessionId?: string, dynamicUiSessionId?: string }} */
+  const plan = {
     version: 1,
     blocks: state.blocks.map((b) => ({
       id: b.id,
@@ -559,6 +569,13 @@ function serializePipelinePlan() {
       dynamicUiCommitted: b.dynamicUiCommitted,
     })),
   };
+  if (workshopSessionIds?.toolingMockSessionId) {
+    plan.toolingMockSessionId = workshopSessionIds.toolingMockSessionId;
+  }
+  if (workshopSessionIds?.dynamicUiSessionId) {
+    plan.dynamicUiSessionId = workshopSessionIds.dynamicUiSessionId;
+  }
+  return plan;
 }
 
 /** @returns {boolean} */
@@ -693,6 +710,196 @@ function sendRealtimeUserTextItem(dc, text) {
       },
     }),
   );
+}
+
+/**
+ * Process/output editors stay frozen during a run; **input** modules stay interactive.
+ * @param {{ role: string }} block
+ */
+function areModuleFieldsLockedDuringRun(block) {
+  if (!state.running) return false;
+  return block.role !== "input";
+}
+
+/**
+ * @param {string} widgetKey
+ * @param {string} value
+ */
+function scheduleWorkshopDynamicUiWidgetPatch(widgetKey, value) {
+  const sid = workshopSessionIds?.dynamicUiSessionId;
+  if (!sid) return;
+  pendingDynamicUiWidgetPatch = pendingDynamicUiWidgetPatch || {};
+  pendingDynamicUiWidgetPatch[widgetKey] = value;
+  if (dynamicUiWidgetSyncTimer) clearTimeout(dynamicUiWidgetSyncTimer);
+  dynamicUiWidgetSyncTimer = setTimeout(() => {
+    dynamicUiWidgetSyncTimer = null;
+    const w = pendingDynamicUiWidgetPatch;
+    pendingDynamicUiWidgetPatch = null;
+    if (!w || !workshopSessionIds?.dynamicUiSessionId) return;
+    void fetch("/api/workshop-session/dynamic-ui", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "patch",
+        session_id: workshopSessionIds.dynamicUiSessionId,
+        patch: { widgets: w },
+      }),
+    });
+  }, 400);
+}
+
+/**
+ * @param {string} blockId
+ */
+function collectDynamicUiWidgetValuesFromDom(blockId) {
+  const card = document.querySelector(`[data-block-id="${blockId}"]`);
+  if (!card) return {};
+  /** @type {Record<string, string>} */
+  const out = {};
+  card.querySelectorAll("[data-dyn-key]").forEach((el) => {
+    const key = el.getAttribute("data-dyn-key");
+    if (!key || !(el instanceof HTMLElement)) return;
+    if (el instanceof HTMLInputElement && el.type === "checkbox") {
+      out[key] = el.checked ? "1" : "0";
+    } else if (el instanceof HTMLInputElement) {
+      out[key] = String(el.value);
+    }
+  });
+  return out;
+}
+
+/**
+ * @param {unknown} url
+ */
+function isHttpsImageUrl(url) {
+  const s = String(url ?? "").trim();
+  if (!s.startsWith("https://")) return false;
+  try {
+    // eslint-disable-next-line no-new
+    new URL(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, formItems?: object[], dynamicUiCommitted?: string, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }} block
+ */
+async function pushSingleInputModuleToRealtime(dc, block) {
+  const def = findDef(block.role, block.typeId);
+  const partTitle = def ? def.title : block.typeId;
+  const label = `Input · ${block.typeId}${block.id ? ` (${block.id})` : ""} — ${partTitle}`;
+
+  if (block.typeId === "audio-live") return;
+
+  if (block.typeId === "audio-rec") {
+    await sendRealtimeAudioRecBlock(dc, block);
+    return;
+  }
+
+  if (block.typeId === "image") {
+    const src = String(block.values?.imageSource ?? "file");
+    if (src === "file") {
+      await sendRealtimeInputImageBlock(dc, block);
+      return;
+    }
+    const url = String(block.values?.imageUrl ?? "").trim();
+    if (isHttpsImageUrl(url)) {
+      dc.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: `${label} (image URL)` },
+              { type: "input_image", image_url: url, detail: "auto" },
+            ],
+          },
+        }),
+      );
+      return;
+    }
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\nImage source: url. ${url ? `Non-HTTPS URL omitted: "${url.slice(0, 80)}".` : "(empty URL)"}`,
+    );
+    return;
+  }
+
+  if (block.typeId === "text") {
+    const text = String(block.values?.content ?? "").trim();
+    sendRealtimeUserTextItem(dc, `${label}\n\n${text || "(empty text input)"}`);
+    return;
+  }
+
+  if (block.typeId === "form") {
+    const card = document.querySelector(`[data-block-id="${block.id}"]`);
+    const formEl = card && card.querySelector("form.composer-form-live");
+    const items = Array.isArray(block.formItems) ? block.formItems : [];
+    const bodyLines = items.map((it, i) => {
+      const optEx = needsFormExtraOptions(it.typ) ? ` (${parseFormOptions(it.options).join("; ")})` : "";
+      return `${i + 1}. [${it.typ}] ${it.label}${optEx}`;
+    });
+    const blueprint = bodyLines.length ? bodyLines.join("\n") : "(no fields defined)";
+    let answers = {};
+    if (formEl) {
+      answers = collectLiveFormAnswersFromDom(formEl, block);
+    }
+    sendRealtimeUserTextItem(
+      dc,
+      `${label} — form blueprint\n${blueprint}\n\nCurrent field values (JSON):\n${JSON.stringify(answers, null, 2)}`,
+    );
+    return;
+  }
+
+  if (block.typeId === "dynamic-ui") {
+    const draft = String(block.values?.uiPrompt ?? "").trim();
+    const staged = String(block.dynamicUiCommitted ?? "").trim();
+    let widgetJson = "{}";
+    if (workshopSessionIds?.dynamicUiSessionId) {
+      try {
+        const r = await fetch("/api/workshop-session/dynamic-ui", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "read",
+            session_id: workshopSessionIds.dynamicUiSessionId,
+          }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (j.ok && j.state && j.state.widgets) {
+          widgetJson = JSON.stringify(j.state.widgets, null, 2);
+        }
+      } catch {
+        widgetJson = JSON.stringify(collectDynamicUiWidgetValuesFromDom(block.id), null, 2);
+      }
+    } else {
+      widgetJson = JSON.stringify(collectDynamicUiWidgetValuesFromDom(block.id), null, 2);
+    }
+    sendRealtimeUserTextItem(
+      dc,
+      `${label} — dynamic UI\nDraft:\n${draft || "(empty)"}\n\nCommitted preview:\n${staged || "(none)"}\n\nWidget snapshot (keys from interactive preview or server session):\n${widgetJson}`,
+    );
+    return;
+  }
+
+  sendRealtimeUserTextItem(
+    dc,
+    `${label}\n(Module-specific values are not mapped to a richer item in this version.)`,
+  );
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ */
+async function pushAllInputModulesToRealtime(dc) {
+  for (const b of state.blocks) {
+    if (b.role !== "input") continue;
+    await pushSingleInputModuleToRealtime(dc, b);
+  }
 }
 
 /**
@@ -988,6 +1195,11 @@ function isTypingInField(el) {
 
 async function stopRealtimeRun() {
   stopImageGenerationProgressUi();
+  if (dynamicUiWidgetSyncTimer) {
+    clearTimeout(dynamicUiWidgetSyncTimer);
+    dynamicUiWidgetSyncTimer = null;
+  }
+  pendingDynamicUiWidgetPatch = null;
   releasePttCtrlHotkey();
   realtimeRunAutoStop = false;
   realtimeDataChannel = null;
@@ -1001,6 +1213,7 @@ async function stopRealtimeRun() {
   }
   state.running = false;
   state.runMode = null;
+  workshopSessionIds = null;
   updateRunChrome();
   lockPalette(false);
   renderAll();
@@ -1055,6 +1268,18 @@ async function startRealtimeRun() {
       return;
     }
 
+    if (data.tooling_mock_session_id || data.dynamic_ui_session_id) {
+      workshopSessionIds = {};
+      if (data.tooling_mock_session_id) {
+        workshopSessionIds.toolingMockSessionId = String(data.tooling_mock_session_id);
+      }
+      if (data.dynamic_ui_session_id) {
+        workshopSessionIds.dynamicUiSessionId = String(data.dynamic_ui_session_id);
+      }
+    } else {
+      workshopSessionIds = null;
+    }
+
     realtimeRunAutoStop = !pipelineHasLiveAudioInput();
     stopImageGenerationProgressUi();
     for (const b of state.blocks) {
@@ -1076,6 +1301,7 @@ async function startRealtimeRun() {
       if (b.role === "output" && b.typeId === "dynamic-ui") {
         delete b._runDynamicUiPrompt;
       }
+    }
     seedTextOutputTranscriptLogsFromPipeline();
 
     const pc = new RTCPeerConnection({ iceServers: REALTIME_WEBRTC_ICE_SERVERS });
@@ -2466,7 +2692,7 @@ function renderOutputTextModule(block, card, schema) {
   const form = document.createElement("div");
   form.className = "module-card-fields output-text-settings";
 
-  const locked = state.running;
+  const locked = areModuleFieldsLockedDuringRun(block);
   schema.fields.forEach((field, fidx) => {
     if (field.type === "hint") {
       const wrap = document.createElement("div");
@@ -2742,8 +2968,9 @@ function parseFormOptions(optionsStr) {
 
 /**
  * Stub UI from keywords in `committedPrompt`.
+ * @param {boolean} [syncWidgetsToServer] when true, interactive input widgets PATCH `/api/workshop-session/dynamic-ui`.
  */
-function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
+function renderDynamicUiPreview(host, committedPrompt, interactive, role, syncWidgetsToServer) {
   host.innerHTML = "";
   host.className = "dynamic-ui-stage";
 
@@ -2795,7 +3022,7 @@ function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
       ["Parameter B", "70"],
       ["Parameter C", "55"],
     ];
-    sliders.forEach(([lbl]) => {
+    sliders.forEach(([lbl, startVal]) => {
       const row = document.createElement("div");
       row.className = "dyn-slide-row";
       const lab = document.createElement("label");
@@ -2805,15 +3032,17 @@ function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
       rng.type = "range";
       rng.min = "0";
       rng.max = "100";
-      rng.value = "44";
+      rng.value = startVal;
       rng.disabled = !(interactive && role === "input");
       rng.className = "dyn-slide-input";
+      rng.dataset.dynKey = `slider:${lbl}`;
       const out = document.createElement("span");
       out.className = "dyn-slide-val";
       out.textContent = rng.value + "%";
       if (!rng.disabled) {
         rng.addEventListener("input", () => {
           out.textContent = rng.value + "%";
+          if (syncWidgetsToServer) scheduleWorkshopDynamicUiWidgetPatch(rng.dataset.dynKey || "", String(rng.value));
         });
       }
       row.appendChild(lab);
@@ -2845,6 +3074,14 @@ function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
         cx.type = "checkbox";
         cx.disabled = !interactive || role !== "input";
         cx.checked = !!(c + rw.length) % 2;
+        cx.dataset.dynKey = `matrix:${rw}:c${c}`;
+        if (!cx.disabled) {
+          cx.addEventListener("change", () => {
+            if (syncWidgetsToServer) {
+              scheduleWorkshopDynamicUiWidgetPatch(cx.dataset.dynKey || "", cx.checked ? "1" : "0");
+            }
+          });
+        }
         td.appendChild(cx);
         tr.appendChild(td);
       }
@@ -3082,7 +3319,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
 function renderFormComposerModule(block, card) {
   if (!Array.isArray(block.formItems)) block.formItems = [];
 
-  const locked = state.running;
+  const locked = areModuleFieldsLockedDuringRun(block);
   const isOutput = block.role === "output";
 
   const body = document.createElement("div");
@@ -3278,7 +3515,7 @@ function renderFormComposerModule(block, card) {
 function renderDynamicUiModule(block, card) {
   if (block.dynamicUiCommitted === undefined || block.dynamicUiCommitted === null) block.dynamicUiCommitted = "";
 
-  const locked = state.running;
+  const locked = areModuleFieldsLockedDuringRun(block);
   const interactive = block.role === "input";
 
   const body = document.createElement("div");
@@ -3334,7 +3571,13 @@ function renderDynamicUiModule(block, card) {
     block.role === "output"
       ? String(block._runDynamicUiPrompt || block.dynamicUiCommitted || "").trim()
       : String(block.dynamicUiCommitted || "").trim();
-  renderDynamicUiPreview(host, previewCommitted, interactive, block.role);
+  renderDynamicUiPreview(
+    host,
+    previewCommitted,
+    interactive,
+    block.role,
+    interactive && block.role === "input" && !!workshopSessionIds?.dynamicUiSessionId,
+  );
 
   body.appendChild(lbl);
   body.appendChild(ta);
@@ -3521,7 +3764,7 @@ function renderModuleCard(block, container) {
   const form = document.createElement("div");
   form.className = "module-card-fields";
 
-  const locked = state.running;
+  const locked = areModuleFieldsLockedDuringRun(block);
 
   schema.fields.forEach((field, fidx) => {
     if (field.showWhen) {
@@ -3665,10 +3908,23 @@ function sendInputsBatch() {
     showToast("No input modules — add some from the library.");
     return;
   }
-  showToast("Inputs submitted (mock). Your backend would send the current input state together.");
-  if (state.running) {
-    applyRunTick();
+  const dc = realtimeDataChannel;
+  if (!state.running || state.runMode !== "realtime" || !dc || dc.readyState !== "open") {
+    showToast("Start a Realtime run first — then Send inputs pushes the latest input state to the model.");
+    return;
   }
+  void (async () => {
+    try {
+      await pushAllInputModulesToRealtime(dc);
+      if (dc.readyState === "open") {
+        dc.send(JSON.stringify({ type: "response.create" }));
+      }
+      showToast("Inputs sent to the model.");
+    } catch (err) {
+      console.warn("Send inputs failed", err);
+      showToast("Send inputs failed — see console.");
+    }
+  })();
 }
 
 function renderEditorSection(role, list, root) {
@@ -3708,12 +3964,12 @@ function renderEditorSection(role, list, root) {
     btn.type = "button";
     btn.className = "input-send-btn";
     btn.textContent = "Send inputs";
-    btn.disabled = state.running;
+    btn.disabled = !(state.running && state.runMode === "realtime");
     btn.addEventListener("click", () => sendInputsBatch());
     const hint = document.createElement("p");
     hint.className = "input-section-actions-hint";
     hint.textContent =
-      "Push updated inputs together (e.g. new text + image). Mock only — connect your backend.";
+      "During a Realtime run, push the latest input module state (text, forms, images, audio clip, dynamic UI) to the model in pipeline order.";
     bar.appendChild(btn);
     bar.appendChild(hint);
     details.appendChild(bar);
@@ -4039,14 +4295,113 @@ async function handleRealtimeResponseDone(msg) {
               `tool:${callId}:done`,
             );
             outStr = JSON.stringify({ ok: true, message: "Dynamic UI output updated." });
+            if (workshopSessionIds?.dynamicUiSessionId) {
+              void fetch("/api/workshop-session/dynamic-ui", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: "patch",
+                  session_id: workshopSessionIds.dynamicUiSessionId,
+                  patch: { nlPrompt: uiPrompt },
+                }),
+              });
+            }
             renderAll();
           }
+        } else if (name === "workshop_mock_tooling_call") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const sid = workshopSessionIds?.toolingMockSessionId;
+          if (!sid) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_mock_tooling_call",
+              "No tooling mock session — add process:tooling and restart the run.",
+              `tool:${callId}:skip`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "no_tooling_session" });
+          } else {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_mock_tooling_call",
+              `Calling mock ${String(args.domain || "")} · ${String(args.operation || "")}`,
+              `tool:${callId}:start`,
+            );
+            try {
+              const res = await fetch("/api/workshop-session/tooling-mock", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sid, call: args }),
+              });
+              const data = await res.json().catch(() => ({}));
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_mock_tooling_call",
+                `Result:\n${JSON.stringify(data, null, 2).slice(0, 6000)}`,
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify(data);
+            } catch (err) {
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_mock_tooling_call",
+                String(/** @type {Error} */ (err).message || err),
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify({ ok: false, error: "mock_tool_fetch_failed" });
+            }
+          }
+        } else if (name === "workshop_dynamic_ui_read_state") {
+          const sid = workshopSessionIds?.dynamicUiSessionId;
+          if (!sid) {
+            outStr = JSON.stringify({ ok: false, error: "no_dynamic_ui_session" });
+          } else {
+            try {
+              const res = await fetch("/api/workshop-session/dynamic-ui", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "read", session_id: sid }),
+              });
+              const data = await res.json().catch(() => ({}));
+              outStr = JSON.stringify(data);
+            } catch {
+              outStr = JSON.stringify({ ok: false, error: "read_failed" });
+            }
+          }
+        } else if (name === "workshop_dynamic_ui_apply_data") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const sid = workshopSessionIds?.dynamicUiSessionId;
+          const data = args.data && typeof args.data === "object" ? args.data : null;
+          if (!sid || !data) {
+            outStr = JSON.stringify({ ok: false, error: "missing_session_or_data" });
+          } else {
+            try {
+              const res = await fetch("/api/workshop-session/dynamic-ui", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "patch", session_id: sid, patch: data }),
+              });
+              const j = await res.json().catch(() => ({}));
+              if (typeof data.nlPrompt === "string" && data.nlPrompt.trim()) {
+                const np = data.nlPrompt.trim();
+                state.blocks
+                  .filter((b) => b.role === "output" && b.typeId === "dynamic-ui")
+                  .forEach((b) => {
+                    b._runDynamicUiPrompt = np;
+                  });
+              }
+              renderAll();
+              outStr = JSON.stringify(j.ok !== false ? j : { ok: false, error: "patch_failed" });
+            } catch {
+              outStr = JSON.stringify({ ok: false, error: "patch_failed" });
+            }
+          }
         } else {
-          appendSystemTranscriptToTextOutputs(
-            `Tool · ${name || "unknown"}`,
-            "This tool is not wired in the workshop client yet.",
-            `tool:${callId}:unwired`,
-          );
           outStr = JSON.stringify({
             ok: false,
             error: "workshop_tool_not_wired",
