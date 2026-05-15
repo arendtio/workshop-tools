@@ -120,7 +120,24 @@ describe("buildRealtimePostConnectSession", () => {
     });
     expect(session.tool_choice).toBe("auto");
     expect(Array.isArray(session.tools)).toBe(true);
-    expect(session.tools?.[0]).toMatchObject({ type: "function", name: "workshop_generate_image" });
+    expect(session.tools?.map((t) => t.name)).toContain("workshop_generate_image");
+  });
+
+  it("registers speech + form + dynamic UI tools when those outputs exist", () => {
+    const session = buildRealtimePostConnectSession({
+      blocks: [
+        { role: "input", typeId: "text", values: { content: "hi" } },
+        { role: "output", typeId: "audio", values: { voice: "alloy" } },
+        { role: "output", typeId: "form", values: {} },
+        { role: "output", typeId: "dynamic-ui", values: {} },
+      ],
+    });
+    expect(session.tool_choice).toBe("auto");
+    const names = session.tools?.map((t) => t.name) ?? [];
+    expect(names).toContain("workshop_synthesize_speech");
+    expect(names).toContain("workshop_emit_form_values");
+    expect(names).toContain("workshop_emit_dynamic_ui");
+    expect(names).not.toContain("workshop_generate_image");
   });
 });
 

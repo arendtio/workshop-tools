@@ -5,6 +5,7 @@ import { validatePlan } from "./validatePlan.js";
 import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
 import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./realtimeSession.js";
 import { generateWorkshopImageFromPlan } from "./imageGeneration.js";
+import { generateWorkshopSpeechFromPlan } from "./speechGeneration.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -102,6 +103,41 @@ export function createApp(opts) {
         ok: false,
         error: code || "OPENAI_IMAGE",
         message: e.message || "Image generation failed.",
+      });
+    }
+  });
+
+  app.post("/api/audio/speech", async (req, res) => {
+    const planBody = req.body?.plan ?? req.body;
+    const input = req.body?.input ?? req.body?.text;
+    const result = validatePlan(planBody);
+    if (!result.ok) {
+      return res.status(400).json({ ok: false, errors: result.errors });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({
+        ok: false,
+        error: "NO_API_KEY",
+        message: "Server is missing OPENAI_API_KEY.",
+      });
+    }
+    try {
+      const out = await generateWorkshopSpeechFromPlan(result.plan, input, {});
+      return res.json({ ok: true, data_url: out.data_url, voice: out.voice, model: out.model });
+    } catch (e) {
+      const code = /** @type {{ code?: string }} */ (e).code;
+      if (code === "NO_SPEECH_OUTPUT") {
+        return res.status(400).json({ ok: false, error: code, message: e.message || "No output:audio in plan." });
+      }
+      if (code === "EMPTY_TTS_INPUT") {
+        return res.status(400).json({ ok: false, error: code, message: e.message });
+      }
+      const st = typeof e.status === "number" ? e.status : NaN;
+      const status = st >= 400 && st < 600 ? st : 502;
+      return res.status(status).json({
+        ok: false,
+        error: code || "OPENAI_SPEECH",
+        message: e.message || "Speech synthesis failed.",
       });
     }
   });

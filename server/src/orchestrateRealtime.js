@@ -63,11 +63,21 @@ export function buildFullRealtimeInstructions(plan) {
   const vector = plan.blocks.find((b) => b.role === "process" && b.typeId === "vector-db");
   if (vector) {
     const names = String(vector.values?.knowledgeFiles ?? "").trim();
-    if (names) {
-      parts.push(
-        `Knowledge / retrieval: participants attached file name(s) in the UI: "${names}". ` +
-          `In production your backend would index these into a vector store and expose file_search; this session has no uploaded bytes yet.`,
-      );
+    const excerpt = String(vector.values?.knowledgeInlineExcerpt ?? "").trim();
+    if (names || excerpt) {
+      const lines = [];
+      if (names) lines.push(`Knowledge / retrieval: participants chose file name(s) in the UI: "${names}".`);
+      if (excerpt) {
+        lines.push(
+          "Plain-text excerpt inlined from those uploads for this session (browser-side; not a real vector index):",
+          excerpt,
+        );
+      } else if (names) {
+        lines.push(
+          "In production your backend would index bytes into a vector store and expose file_search; this session has no text excerpt yet (use a .txt / .md upload in the workbench).",
+        );
+      }
+      parts.push(lines.join("\n"));
     }
   }
 
@@ -102,13 +112,13 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "audio-live")
       return `- Output: live audio (voice ${String(b.values?.voice ?? "default").trim() || "default"}; match session audio output).`;
     if (b.typeId === "audio")
-      return `- Output: TTS / speech file (voice preference: ${String(b.values?.voice ?? "").trim() || "server default"}).`;
+      return `- Output: TTS / speech file (voice preference: ${String(b.values?.voice ?? "").trim() || "server default"}). Call \`workshop_synthesize_speech\` only after the participant asks for spoken audio or a voice summary—not at session start without that request.`;
     if (b.typeId === "image")
       return `- Output: image (size hint: ${String(b.values?.size ?? "").trim() || "server default"}). Call \`workshop_generate_image\` only after the participant gives explicit instructions to generate or edit an image (voice or text)—not at session start.`;
     if (b.typeId === "form")
-      return "- Output: structured form (describe fields the host should collect or present).";
+      return "- Output: structured form — call `workshop_emit_form_values` with `{ fields: [{ label, value }] }` when you have final values to show.";
     if (b.typeId === "dynamic-ui")
-      return "- Output: NL-driven UI (summarize widgets the host should render from model output).";
+      return "- Output: NL-driven UI — call `workshop_emit_dynamic_ui` with `{ ui_prompt }` when you should refresh the rendered preview.";
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
