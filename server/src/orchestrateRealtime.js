@@ -218,14 +218,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     }
 
     if (b.typeId === "audio-rec") {
-      const stub = String(b.values?.uploadStub ?? "").trim();
-      const rec = String(b.values?.recordingStub ?? "").trim();
-      events.push(
-        conversationUserText(
-          `${label}\nRecorded/uploaded audio is not attached in this bootstrap. ` +
-            `Stubs: file="${stub || "—"}" recording="${rec || "—"}".`,
-        ),
-      );
+      // Bytes are attached after WebRTC connect by the browser (PCM via `input_audio`).
       continue;
     }
 

@@ -487,13 +487,13 @@ const FORM_SCHEMA = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant', label: string, body: string }[] }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
-  /** Continuous mock run (no modal) */
+  /** Workshop run locks the palette while a Realtime session is active */
   running: false,
-  /** @type {null | 'mock' | 'realtime'} */
+  /** @type {null | 'realtime'} */
   runMode: null,
 };
 
@@ -501,6 +501,23 @@ const state = {
 let realtimePeerConnection = null;
 /** @type {MediaStream | null} */
 let realtimeLocalStream = null;
+/** @type {RTCDataChannel | null} */
+let realtimeDataChannel = null;
+/**
+ * When true, a completed model `response.done` ends the run (pipelines without live mic input).
+ * Live microphone pipelines stay running until the user stops them.
+ */
+let realtimeRunAutoStop = false;
+
+/**
+ * Explicit STUN helps Firefox/Chrome keep ICE consent refreshes working through NAT;
+ * bare `new RTCPeerConnection()` relies on browser defaults and can hit “consent timed out” ~30s.
+ * @type {{ urls: string }[]}
+ */
+const REALTIME_WEBRTC_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
 
 /** Ctrl-hold PTT engaged (hold mode); released on Ctrl keyup, blur, or run stop. */
 let pttCtrlMicEngaged = false;
@@ -535,12 +552,201 @@ function serializePipelinePlan() {
   };
 }
 
-function pipelineNeedsRealtime() {
+/** @returns {boolean} */
+function pipelineUsesLiveAudioModules() {
   return state.blocks.some(
     (b) =>
       (b.role === "input" && b.typeId === "audio-live") ||
       (b.role === "output" && b.typeId === "audio-live"),
   );
+}
+
+/** Live microphone input — keeps the run open until the user explicitly stops. */
+function pipelineHasLiveAudioInput() {
+  return state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
+}
+
+const REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS = 12_000_000;
+
+/**
+ * @param {AudioBuffer} ab
+ * @returns {Float32Array}
+ */
+function float32MonoFromAudioBuffer(ab) {
+  const n = ab.numberOfChannels;
+  const len = ab.length;
+  const out = new Float32Array(len);
+  if (n === 1) {
+    out.set(ab.getChannelData(0));
+  } else {
+    for (let i = 0; i < len; i++) {
+      let s = 0;
+      for (let c = 0; c < n; c++) s += ab.getChannelData(c)[i];
+      out[i] = s / n;
+    }
+  }
+  return out;
+}
+
+/**
+ * @param {Float32Array} input
+ * @param {number} fromRate
+ * @param {number} toRate
+ */
+function resampleLinear(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+  const ratio = fromRate / toRate;
+  const outLen = Math.max(1, Math.floor(input.length / ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const srcPos = i * ratio;
+    const j = Math.floor(srcPos);
+    const f = srcPos - j;
+    const a = input[j] ?? 0;
+    const b = input[j + 1] ?? a;
+    out[i] = a + (b - a) * f;
+  }
+  return out;
+}
+
+/**
+ * @param {Float32Array} f32
+ * @returns {Uint8Array}
+ */
+function floatTo16BitPCM(f32) {
+  const buf = new ArrayBuffer(f32.length * 2);
+  const v = new DataView(buf);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    v.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Uint8Array(buf);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ */
+function uint8ToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Realtime `input_audio` defaults to PCM 16-bit 24kHz mono.
+ * @param {Blob} blob
+ */
+async function blobToRealtimeInputAudioBase64(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const ctx = new AudioContext();
+  try {
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+    const mono = float32MonoFromAudioBuffer(audioBuffer);
+    const resampled = resampleLinear(mono, audioBuffer.sampleRate, 24000);
+    const pcm = floatTo16BitPCM(resampled);
+    return uint8ToBase64(pcm);
+  } finally {
+    await ctx.close();
+  }
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {string} text
+ */
+function sendRealtimeUserTextItem(dc, text) {
+  dc.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    }),
+  );
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, _recordedAudioBlob?: Blob | null }} block
+ */
+async function sendRealtimeAudioRecBlock(dc, block) {
+  const label = `Input · audio-rec (${block.id})`;
+  const blob = block._recordedAudioBlob;
+  if (!blob || blob.size < 1) {
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(No recorded or uploaded audio in this browser session — record or choose a file before Run.)`,
+    );
+    return;
+  }
+  let b64;
+  try {
+    b64 = await blobToRealtimeInputAudioBase64(blob);
+  } catch (e) {
+    console.warn("Could not encode audio for Realtime", e);
+    showToast("Audio could not be decoded for Realtime — try WAV/MP3 or a shorter clip.");
+    sendRealtimeUserTextItem(dc, `${label}\n(Audio decode failed in the browser.)`);
+    return;
+  }
+  if (b64.length > REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS) {
+    showToast("Audio clip too large for Realtime — use a shorter recording.");
+    sendRealtimeUserTextItem(dc, `${label}\n(Attached audio exceeded the browser size guard.)`);
+    return;
+  }
+  dc.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `${label}\nUser audio is attached below as PCM 16-bit mono @ 24kHz (decoded in the browser from the recording or file).`,
+          },
+          { type: "input_audio", audio: b64 },
+        ],
+      },
+    }),
+  );
+}
+
+/**
+ * Preserve pipeline input order: walk blocks and interleave `audio-rec` (client) with other inputs from server bootstrap.
+ * @param {RTCDataChannel} dc
+ * @param {object[]} bootstrapEvents
+ */
+async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
+  let bi = 0;
+  for (const b of state.blocks) {
+    if (b.role !== "input") continue;
+    if (b.typeId === "audio-live") continue;
+    if (b.typeId === "audio-rec") {
+      await sendRealtimeAudioRecBlock(dc, b);
+      continue;
+    }
+    if (bi < bootstrapEvents.length) {
+      try {
+        dc.send(JSON.stringify(bootstrapEvents[bi]));
+      } catch (err) {
+        console.warn("Orchestration bootstrap send failed", err);
+      }
+      bi += 1;
+    }
+  }
+  while (bi < bootstrapEvents.length) {
+    try {
+      dc.send(JSON.stringify(bootstrapEvents[bi]));
+    } catch (err) {
+      console.warn("Orchestration bootstrap tail send failed", err);
+    }
+    bi += 1;
+  }
 }
 
 function releasePttCtrlHotkey() {
@@ -565,6 +771,8 @@ function isTypingInField(el) {
 
 async function stopRealtimeRun() {
   releasePttCtrlHotkey();
+  realtimeRunAutoStop = false;
+  realtimeDataChannel = null;
   if (realtimeLocalStream) {
     realtimeLocalStream.getTracks().forEach((t) => t.stop());
     realtimeLocalStream = null;
@@ -623,8 +831,22 @@ async function startRealtimeRun() {
       data.orchestration && Array.isArray(data.orchestration.client_events)
         ? data.orchestration.client_events
         : [];
+    const postConnectSession = data.post_connect_session;
+    if (!postConnectSession || typeof postConnectSession !== "object") {
+      showToast("Server returned no Realtime session payload.");
+      return;
+    }
 
-    const pc = new RTCPeerConnection();
+    realtimeRunAutoStop = !pipelineHasLiveAudioInput();
+    for (const b of state.blocks) {
+      if (b.role === "output" && b.typeId === "text") {
+        b.runPreview = "";
+        b._transcriptLog = [];
+      }
+    }
+    seedTextOutputTranscriptLogsFromPipeline();
+
+    const pc = new RTCPeerConnection({ iceServers: REALTIME_WEBRTC_ICE_SERVERS });
     realtimePeerConnection = pc;
 
     const remoteAudio = document.createElement("audio");
@@ -643,27 +865,63 @@ async function startRealtimeRun() {
         audioLivePttToggleState.clear();
         setRealtimeLocalMicEnabled(false);
       }
+    } else {
+      // OpenAI Realtime `/realtime/calls` rejects SDP offers without an audio m-line ("invalid_offer").
+      pc.addTransceiver("audio", { direction: "recvonly" });
     }
 
     const dc = pc.createDataChannel("oai-events");
-    if (bootstrapEvents.length) {
-      dc.addEventListener(
-        "open",
-        () => {
-          for (const ev of bootstrapEvents) {
-            try {
-              dc.send(JSON.stringify(ev));
-            } catch (err) {
-              console.warn("Orchestration bootstrap send failed", err);
-            }
+    realtimeDataChannel = dc;
+    let postConnectFlushed = false;
+    let sessionCreatedReceived = false;
+
+    const flushPostConnect = () => {
+      if (postConnectFlushed || !sessionCreatedReceived || dc.readyState !== "open") return;
+      postConnectFlushed = true;
+      try {
+        dc.send(JSON.stringify({ type: "session.update", session: postConnectSession }));
+      } catch (err) {
+        console.warn("Realtime session.update send failed", err);
+      }
+      void (async () => {
+        try {
+          await mergeRealtimeBootstrapUserItems(dc, bootstrapEvents);
+        } catch (e) {
+          console.warn("Realtime bootstrap merge failed", e);
+        }
+        try {
+          if (dc.readyState === "open") {
+            dc.send(JSON.stringify({ type: "response.create" }));
           }
-        },
-        { once: true },
-      );
-    }
+        } catch (err) {
+          console.warn("Realtime response.create send failed", err);
+        }
+      })();
+    };
+
+    dc.addEventListener("open", () => {
+      flushPostConnect();
+    });
     dc.addEventListener("message", (ev) => {
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        handleRealtimeDataChannelMessage(ev.data);
+        return;
+      }
+      if (msg && msg.type === "session.created") {
+        sessionCreatedReceived = true;
+        flushPostConnect();
+      }
       handleRealtimeDataChannelMessage(ev.data);
     });
+
+    state.running = true;
+    state.runMode = "realtime";
+    updateRunChrome();
+    lockPalette(true);
+    renderAll();
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -686,12 +944,11 @@ async function startRealtimeRun() {
     const answer = { type: "answer", sdp: await sdpRes.text() };
     await pc.setRemoteDescription(answer);
 
-    state.running = true;
-    state.runMode = "realtime";
-    updateRunChrome();
-    lockPalette(true);
-    renderAll();
-    showToast("Realtime session connected — click Running or Esc to stop.");
+    showToast(
+      pipelineHasLiveAudioInput()
+        ? "Realtime session connected — click Running or Esc when you are done."
+        : "Realtime session connected — the run will end automatically when the model response completes.",
+    );
   } catch (e) {
     console.error(e);
     await stopRealtimeRun();
@@ -1022,10 +1279,7 @@ function restorePipelineFromSnapshot(rows) {
   for (const row of rows) {
     if (!row || !isValidRole(row.role) || typeof row.typeId !== "string" || !row.typeId.trim()) return false;
   }
-  if (state.running) {
-    if (state.runMode === "realtime") void stopRealtimeRun();
-    else stopMockRun();
-  }
+  if (state.running) void stopRealtimeRun();
   state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.blocks = [];
   audioLivePttToggleState.clear();
@@ -1049,10 +1303,7 @@ function restorePipelineFromSnapshot(rows) {
 function applyBuiltinPreset(presetId, silent) {
   const p = BUILTIN_PRESETS[presetId];
   if (!p) return false;
-  if (state.running) {
-    if (state.runMode === "realtime") void stopRealtimeRun();
-    else stopMockRun();
-  }
+  if (state.running) void stopRealtimeRun();
   state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.blocks = [];
   audioLivePttToggleState.clear();
@@ -1061,7 +1312,7 @@ function applyBuiltinPreset(presetId, silent) {
   });
   renderAll();
   if (!silent) {
-    showToast("Example pipeline loaded — forms are editable; nothing executes for real.");
+    showToast("Example pipeline loaded — use Run (Node server + API key) for a live model.");
   }
   return true;
 }
@@ -1147,7 +1398,7 @@ function renderMeta() {
       ? "Nothing in pipeline"
       : `${n} part${n === 1 ? "" : "s"} · ${inputs} input · ${proc} process · ${outs} output`;
   if (state.running && n > 0) {
-    line += state.runMode === "realtime" ? " · realtime run" : " · mock run active";
+    line += " · realtime run";
   }
   meta.textContent = line;
 
@@ -1162,7 +1413,8 @@ function renderHintField(field, wrap) {
   wrap.appendChild(p);
 }
 
-function renderDropzoneField(field, blockId, values, disabled, wrap) {
+function renderDropzoneField(field, block, disabled, wrap) {
+  const values = block.values;
   const zone = document.createElement("div");
   zone.className = "dropzone" + (disabled ? " is-disabled" : "");
   zone.tabIndex = disabled ? -1 : 0;
@@ -1187,6 +1439,9 @@ function renderDropzoneField(field, blockId, values, disabled, wrap) {
     const f = inp.files && inp.files[0];
     values[field.key] = f ? f.name : "";
     sub.textContent = f ? `Selected: ${f.name}` : "No file selected";
+    if (block.typeId === "audio-rec") {
+      block._recordedAudioBlob = f || null;
+    }
   });
 
   zone.addEventListener("click", () => {
@@ -1217,6 +1472,9 @@ function renderDropzoneField(field, blockId, values, disabled, wrap) {
     if (f) {
       values[field.key] = f.name;
       sub.textContent = `Selected: ${f.name}`;
+      if (block.typeId === "audio-rec") {
+        block._recordedAudioBlob = f;
+      }
     }
   });
 
@@ -1330,15 +1588,68 @@ function renderAudioRecordField(field, block, disabled, wrap) {
   stop.textContent = "Stop";
   stop.disabled = true;
 
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "audio-recorder-btn audio-recorder-secondary";
+  play.textContent = "Play";
+  play.title = "Preview the clip stored for this run (same bytes as sent to Realtime)";
+  play.disabled = disabled || !block._recordedAudioBlob || !!blockMediaRecorders.get(block.id);
+
+  const audioPreview = document.createElement("audio");
+  audioPreview.setAttribute("playsinline", "");
+  audioPreview.preload = "none";
+  audioPreview.className = "audio-recorder-preview-audio";
+  let previewObjectUrl = null;
+
+  audioPreview.addEventListener("ended", () => {
+    revokePreviewUrl();
+    audioPreview.removeAttribute("src");
+  });
+  audioPreview.addEventListener("error", () => {
+    showToast("Audio preview failed to load in the browser.");
+    revokePreviewUrl();
+  });
+
+  function revokePreviewUrl() {
+    if (previewObjectUrl) {
+      URL.revokeObjectURL(previewObjectUrl);
+      previewObjectUrl = null;
+    }
+  }
+
+  function syncPlayEnabled() {
+    play.disabled =
+      disabled || !block._recordedAudioBlob || !!blockMediaRecorders.get(block.id);
+  }
+
+  play.addEventListener("click", async () => {
+    if (play.disabled || !block._recordedAudioBlob) return;
+    try {
+      revokePreviewUrl();
+      audioPreview.pause();
+      previewObjectUrl = URL.createObjectURL(block._recordedAudioBlob);
+      audioPreview.src = previewObjectUrl;
+      await audioPreview.play();
+    } catch {
+      showToast("Playback failed — this browser may not decode the clip format.");
+    }
+  });
+
   btnRow.appendChild(start);
   btnRow.appendChild(stop);
+  btnRow.appendChild(play);
   row.appendChild(btnRow);
+  row.appendChild(audioPreview);
   row.appendChild(status);
 
   start.addEventListener("click", async () => {
     if (disabled) return;
     stopBlockRecorder(block.id);
+    revokePreviewUrl();
+    audioPreview.removeAttribute("src");
     block.values[field.key] = "";
+    block._recordedAudioBlob = null;
+    syncPlayEnabled();
     status.textContent = "Requesting microphone…";
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1358,20 +1669,25 @@ function renderAudioRecordField(field, block, disabled, wrap) {
           const ext = mime && mime.includes("webm") ? "webm" : "m4a";
           const name = `recording-${Date.now()}.${ext}`;
           block.values[field.key] = name;
-          status.textContent = `Recorded: ${name} (blob kept locally for your backend)`;
+          block._recordedAudioBlob = new Blob(chunks, { type: mime || "audio/webm" });
+          status.textContent = `Recorded: ${name} (attached on Run)`;
         } else {
           status.textContent = "Recording empty — try again.";
+          block._recordedAudioBlob = null;
         }
         blockMediaRecorders.delete(block.id);
         start.disabled = disabled;
         stop.disabled = true;
+        syncPlayEnabled();
       });
       rec.start(200);
       blockMediaRecorders.set(block.id, { recorder: rec, chunks, statusEl: status });
       start.disabled = true;
       stop.disabled = false;
+      play.disabled = true;
     } catch {
       status.textContent = "Microphone not available or denied.";
+      syncPlayEnabled();
     }
   });
 
@@ -1616,85 +1932,195 @@ function gatherConversationSnapshotForTextOutput() {
   return { systemParts, userTurns };
 }
 
-function chatTagAbbrev(label) {
-  const s = String(label || "").trim();
-  if (!s) return "·";
-  const u = s.toUpperCase();
-  if (u.length <= 4) return u;
-  return `${u.slice(0, 3)}…`;
+/**
+ * @param {string} raw
+ * @returns {{ label: string, body: string }[]}
+ */
+function parseRunPreviewSegments(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return [];
+  const out = [];
+  const re = /(?:^|\n)── ([^─\n]+) ──\n([\s\S]*?)(?=\n── |$)/g;
+  let m;
+  while ((m = re.exec(t)) !== null) {
+    const body = m[2].trim();
+    if (body) out.push({ label: m[1].trim(), body });
+  }
+  return out;
 }
 
-function appendChatBubble(roleClass, tagText, tagTitle, bodyText) {
-  const row = document.createElement("div");
-  row.className = "output-chat-row output-chat-row-" + roleClass;
-  const tag = document.createElement("span");
-  tag.className = "output-chat-role";
-  tag.textContent = tagText;
-  tag.title = tagTitle;
-  const bubble = document.createElement("div");
-  bubble.className = "output-chat-bubble";
-  const pre = document.createElement("pre");
-  pre.className = "output-chat-body";
-  pre.textContent = bodyText || "(empty)";
-  bubble.appendChild(pre);
-  row.appendChild(tag);
-  row.appendChild(bubble);
-  return row;
+/**
+ * @param {string} label
+ * @returns {"user" | "assistant"}
+ */
+function mapTranscriptLabelToBubbleRole(label) {
+  const s = String(label || "").trim();
+  if (s === "You (voice)") return "user";
+  return "assistant";
+}
+
+/**
+ * Ordered transcript lines for the text-output card (mirrors `runPreview` string format).
+ * @param {{ _transcriptLog?: { key: string, role: string, label: string, body: string }[] }} block
+ */
+function ensureTranscriptLog(block) {
+  if (!Array.isArray(block._transcriptLog)) block._transcriptLog = [];
+  return block._transcriptLog;
+}
+
+/**
+ * @param {{ runPreview?: string, _transcriptLog?: { key: string, role: string, label: string, body: string }[] }} block
+ */
+function rebuildRunPreviewFromLog(block) {
+  const log = ensureTranscriptLog(block);
+  if (!log.length) {
+    block.runPreview = "";
+    return;
+  }
+  block.runPreview = log
+    .map((e) => `\n── ${e.label} ──\n${e.body}\n`)
+    .join("")
+    .replace(/^\n+/, "")
+    .trimEnd();
+}
+
+/** Seed visible user-side pipeline inputs once per run so the log matches the server bootstrap. */
+function seedTextOutputTranscriptLogsFromPipeline() {
+  const inputs = state.blocks.filter((b) => b.role === "input");
+  const snap = gatherConversationSnapshotForTextOutput();
+  const textOuts = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  if (!textOuts.length) return;
+
+  /** @type {{ key: string, role: "user", label: string, body: string }[]} */
+  const entries = [];
+  for (let i = 0; i < snap.userTurns.length; i++) {
+    const inp = inputs[i];
+    if (!inp || inp.typeId === "audio-live") continue;
+    const u = snap.userTurns[i];
+    entries.push({
+      key: `pipeline-seed:${inp.id}`,
+      role: "user",
+      label: u.label,
+      body: u.body || "(empty)",
+    });
+  }
+
+  for (const b of textOuts) {
+    b._transcriptLog = entries.map((e) => ({ ...e }));
+    rebuildRunPreviewFromLog(b);
+  }
+}
+
+/**
+ * @param {ConversationSnapshot} snap
+ * @param {{ runPreview?: string, _transcriptLog?: { key: string, role: string, label: string, body: string }[], _textOutputShowSystem?: boolean }} block
+ * @returns {{ role: "system" | "user" | "assistant", meta: string, body: string }[]}
+ */
+function transcriptRowsForTextOutputBlock(block, snap, showSystem) {
+  /** @type {{ role: "system" | "user" | "assistant", meta: string, body: string }[]} */
+  const rows = [];
+
+  if (showSystem && snap.systemParts.length) {
+    for (const p of snap.systemParts) {
+      rows.push({ role: "system", meta: p.label, body: p.body });
+    }
+  }
+
+  const log = Array.isArray(block._transcriptLog) ? block._transcriptLog : [];
+  if (log.length > 0) {
+    for (const e of log) {
+      const role = e.role === "user" ? "user" : "assistant";
+      rows.push({ role, meta: e.label, body: e.body });
+    }
+    return rows;
+  }
+
+  const rp = String(block.runPreview || "").trim();
+  if (rp) {
+    for (const seg of parseRunPreviewSegments(block.runPreview || "")) {
+      rows.push({
+        role: mapTranscriptLabelToBubbleRole(seg.label),
+        meta: seg.label,
+        body: seg.body,
+      });
+    }
+    return rows;
+  }
+
+  return rows;
+}
+
+/**
+ * @param {HTMLElement} el
+ * @param {{ id: string, runPreview?: string, _textOutputShowSystem?: boolean, _transcriptLog?: { key: string, role: string, label: string, body: string }[] }} block
+ */
+function fillTextOutputChatStream(el, block) {
+  el.innerHTML = "";
+  const showSystem = !!block._textOutputShowSystem;
+  const snap = gatherConversationSnapshotForTextOutput();
+  const rows = transcriptRowsForTextOutputBlock(block, snap, showSystem);
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "output-text-chat-empty";
+    empty.textContent =
+      state.running && state.runMode === "realtime" ? "Waiting for messages…" : "No messages yet.";
+    el.appendChild(empty);
+    return;
+  }
+
+  for (const row of rows) {
+    const wrap = document.createElement("div");
+    wrap.className = `output-text-msg output-text-msg--${row.role}`;
+    const meta = document.createElement("div");
+    meta.className = "output-text-msg-meta";
+    meta.textContent = row.meta;
+    wrap.appendChild(meta);
+    const bubble = document.createElement("div");
+    bubble.className = "output-text-msg-bubble";
+    bubble.textContent = row.body;
+    wrap.appendChild(bubble);
+    el.appendChild(wrap);
+  }
+
+  el.scrollTop = el.scrollHeight;
 }
 
 function renderOutputTextConversationPreview(block, card) {
-  const snap = gatherConversationSnapshotForTextOutput();
-  const thread = document.createElement("div");
-  thread.className = "output-chat-thread output-chat-thread--compact";
+  if (block._textOutputShowSystem === undefined) block._textOutputShowSystem = false;
 
-  const lead = document.createElement("div");
-  lead.className = "output-chat-lede";
-  lead.textContent =
-    state.runMode === "realtime" && state.running ? "Live session log" : "Chat preview (mock)";
-  thread.appendChild(lead);
+  const root = document.createElement("div");
+  root.className = "output-text-chat";
 
-  if (!snap.systemParts.length) {
-    thread.appendChild(appendChatBubble("system", "—", "System", "(no system instructions yet)"));
-  } else {
-    snap.systemParts.forEach((part) => {
-      thread.appendChild(appendChatBubble("system", chatTagAbbrev(part.label), part.label, part.body));
-    });
-  }
+  const toolbar = document.createElement("div");
+  toolbar.className = "output-text-chat-toolbar";
 
-  if (!snap.userTurns.length) {
-    thread.appendChild(appendChatBubble("user", "—", "User inputs", "(add input modules)"));
-  } else {
-    snap.userTurns.forEach((row) => {
-      thread.appendChild(appendChatBubble("user", chatTagAbbrev(row.label), row.label, row.body));
-    });
-  }
+  const toggleLab = document.createElement("label");
+  toggleLab.className = "output-text-chat-toggle";
 
-  const asstRow = document.createElement("div");
-  asstRow.className = "output-chat-row output-chat-row-assistant";
-  const tag = document.createElement("span");
-  tag.className = "output-chat-role";
-  tag.textContent = "OUT";
-  tag.title = "Assistant reply";
-  const bubble = document.createElement("div");
-  bubble.className = "output-chat-bubble output-chat-bubble-assistant";
+  const toggleInp = document.createElement("input");
+  toggleInp.type = "checkbox";
+  toggleInp.checked = !!block._textOutputShowSystem;
+  toggleInp.addEventListener("change", () => {
+    block._textOutputShowSystem = toggleInp.checked;
+    renderAll();
+  });
 
-  const ta = document.createElement("textarea");
-  ta.className = "run-preview-inline output-chat-assistant-ta";
-  ta.readOnly = true;
-  ta.setAttribute("data-run-preview-block", block.id);
-  ta.rows = 5;
-  ta.placeholder =
-    state.runMode === "realtime" && state.running
-      ? "Completed transcripts from the live session appear here (not streamed deltas)."
-      : "Run the pipeline to simulate a reply here.";
-  ta.value = block.runPreview || "";
-  bubble.appendChild(ta);
+  const toggleTxt = document.createElement("span");
+  toggleTxt.textContent = "Show system messages";
 
-  asstRow.appendChild(tag);
-  asstRow.appendChild(bubble);
-  thread.appendChild(asstRow);
+  toggleLab.appendChild(toggleInp);
+  toggleLab.appendChild(toggleTxt);
+  toolbar.appendChild(toggleLab);
+  root.appendChild(toolbar);
 
-  card.appendChild(thread);
+  const stream = document.createElement("div");
+  stream.className = "output-text-chat-stream";
+  stream.setAttribute("data-text-output-chat", block.id);
+  fillTextOutputChatStream(stream, block);
+  root.appendChild(stream);
+
+  card.appendChild(root);
 }
 
 function renderOutputTextModule(block, card, schema) {
@@ -2357,7 +2783,7 @@ const PTT_ICON_MIC_LIVE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 const PTT_ICON_MIC_MUTED = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.84 18.84A8 8 0 0 1 5 15H3a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2h1"/><path d="M10.37 10.37a5 5 0 0 0-1.17 3.13V15"/><path d="M15 15v-3a5 5 0 0 0-.91-2.84"/><path d="M9 9v-1a3 3 0 0 1 5.12-2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 
 /**
- * Push-to-talk: toggles the outgoing Realtime mic track (`enabled`). Mock runs have no capture stream — UI only.
+ * Push-to-talk: toggles the outgoing Realtime mic track (`enabled`).
  */
 function renderAudioLivePttBar(block, card) {
   const wrap = document.createElement("div");
@@ -2383,7 +2809,8 @@ function renderAudioLivePttBar(block, card) {
       ? "Hold to unmute the microphone; release to mute again. While running, holding Ctrl does the same."
       : "Press to unmute the microphone; press again to mute. While running, Ctrl toggles the same way.";
   } else {
-    hint.textContent = "Mock run: practice only — no microphone track. Ctrl still mirrors the button while running.";
+    hint.textContent =
+      "Realtime is active but no microphone track is available yet — check permissions or wait for capture.";
   }
 
   const btn = document.createElement("button");
@@ -2498,13 +2925,6 @@ function renderModuleCard(block, container) {
   const sk = formSchemaKey(block.role, block.typeId);
   const schema = FORM_SCHEMA[sk];
 
-  if (schema && schema.apiMapping) {
-    const mapEl = document.createElement("p");
-    mapEl.className = "module-api-mapping";
-    mapEl.innerHTML = `<span class="module-api-mapping-k">API note</span> ${escapeHtml(schema.apiMapping)}`;
-    card.appendChild(mapEl);
-  }
-
   if (block.typeId === "form") {
     renderFormComposerModule(block, card);
     container.appendChild(card);
@@ -2612,7 +3032,7 @@ function renderModuleCard(block, container) {
       });
       wrap.appendChild(sel);
     } else if (field.type === "dropzone") {
-      renderDropzoneField(field, block.id, block.values, locked, wrap);
+      renderDropzoneField(field, block, locked, wrap);
     } else if (field.type === "camera_preview") {
       renderCameraPreviewField(field, block, locked, wrap);
     } else if (field.type === "file") {
@@ -2738,14 +3158,14 @@ function renderModuleEditor() {
   renderEditorSection("output", outs, root);
 }
 
-let mockRunInterval = null;
-
 /**
- * Append finalized Realtime transcript chunks to every text output module (assistant pane).
+ * Append one transcript line to every text-output block (`_transcriptLog` + mirrored `runPreview`).
+ * Lines stay in server event arrival order; we do not reorder (reordering broke e.g. intro then first user utterance).
  * @param {"user-voice" | "assistant-voice" | "assistant-text"} kind
  * @param {string} text
+ * @param {Record<string, unknown>} [src] source Realtime event (ids for dedupe)
  */
-function appendRealtimeTranscriptToTextOutputs(kind, text) {
+function appendRealtimeTranscriptToTextOutputs(kind, text, src = {}) {
   const body = String(text || "").trim();
   if (!body) return;
   const label =
@@ -2754,20 +3174,123 @@ function appendRealtimeTranscriptToTextOutputs(kind, text) {
       : kind === "assistant-voice"
         ? "Assistant (voice)"
         : "Assistant (text)";
-  const blockText = `\n── ${label} ──\n${body}\n`;
+  const role = kind === "user-voice" ? "user" : "assistant";
+  const msg = src && typeof src === "object" ? src : {};
+  const itemId = String(/** @type {{ item_id?: string }} */ (msg).item_id || "").trim();
+  const eventId = String(/** @type {{ event_id?: string }} */ (msg).event_id || "").trim();
+  const outIdx = /** @type {{ output_index?: number }} */ (msg).output_index;
+  const resp = msg.response && typeof msg.response === "object" ? msg.response : null;
+  const responseId = resp && String(/** @type {{ id?: string }} */ (resp).id || "").trim();
+
+  let dedupeKey;
+  if (kind === "user-voice") {
+    dedupeKey = `user-voice:${itemId || eventId || body.slice(0, 64)}`;
+  } else if (kind === "assistant-voice") {
+    dedupeKey = `assistant-voice:${itemId || `${responseId}:${outIdx ?? 0}`}`;
+  } else {
+    dedupeKey = `assistant-text:${responseId || eventId || body.slice(0, 80)}`;
+  }
+
+  const entry = { key: dedupeKey, role, label, body };
   const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
   if (!textTargets.length) return;
-  if (textTargets.length === 1) {
-    const prev = (textTargets[0].runPreview || "").trim();
-    textTargets[0].runPreview = prev ? `${prev}\n${blockText.trimEnd()}` : blockText.trimStart();
-  } else {
-    const chunk = blockText.trimEnd();
-    textTargets.forEach((b) => {
-      const prev = (b.runPreview || "").trim();
-      b.runPreview = prev ? `${prev}\n${chunk}` : chunk;
-    });
+
+  for (const b of textTargets) {
+    const log = ensureTranscriptLog(b);
+    if (log.some((e) => e.key === dedupeKey)) continue;
+
+    log.push({ ...entry });
+    rebuildRunPreviewFromLog(b);
   }
-  syncOutputPreviewFieldsFromState();
+  syncOutputTextChatFromState();
+}
+
+/**
+ * End one-shot runs when the model finishes, and chain stub tool outputs so the session can continue.
+ * Pipelines with a live microphone input never auto-stop (conversation stays open).
+ * @param {Record<string, unknown>} msg
+ */
+function handleRealtimeResponseDone(msg) {
+  if (!realtimeRunAutoStop || !state.running || state.runMode !== "realtime") return;
+  const dc = realtimeDataChannel;
+  if (!dc || dc.readyState !== "open") return;
+
+  const resp = msg.response;
+  if (!resp || typeof resp !== "object") {
+    void stopRealtimeRun();
+    return;
+  }
+
+  const status = /** @type {string} */ (resp.status);
+  if (status === "failed" || status === "cancelled") {
+    void stopRealtimeRun();
+    return;
+  }
+
+  const output = Array.isArray(resp.output) ? resp.output : [];
+  const functionCalls = output.filter((it) => it && typeof it === "object" && it.type === "function_call");
+
+  if (functionCalls.length > 0) {
+    try {
+      for (const fc of functionCalls) {
+        const callId = String(
+          /** @type {{ call_id?: string, id?: string }} */ (fc).call_id ||
+            /** @type {{ call_id?: string, id?: string }} */ (fc).id ||
+            "",
+        ).trim();
+        if (!callId) continue;
+        const name = String(/** @type {{ name?: string }} */ (fc).name || "").trim();
+        const stubOutput = JSON.stringify({
+          ok: false,
+          error: "workshop_tool_not_wired",
+          name,
+          message:
+            "This Realtime tool call is not executed in the browser yet. Implement it on the workshop server or extend the client runner.",
+        });
+        dc.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: callId,
+              output: stubOutput,
+            },
+          }),
+        );
+      }
+      dc.send(JSON.stringify({ type: "response.create" }));
+    } catch (err) {
+      console.warn("Realtime tool stub chain failed", err);
+      void stopRealtimeRun();
+    }
+    return;
+  }
+
+  void stopRealtimeRun();
+}
+
+/**
+ * Final assistant text comes from `response.done` only (also avoids duplicating `response.output_text.done`).
+ * Assistant voice transcripts use `response.output_audio_transcript.done` only.
+ * @param {Record<string, unknown>} msg
+ */
+function appendAssistantTextFromResponseDonePayload(msg) {
+  const resp = msg.response;
+  if (!resp || typeof resp !== "object" || !Array.isArray(resp.output)) return;
+  const textParts = [];
+  for (const item of resp.output) {
+    if (!item || typeof item !== "object" || item.type !== "message" || item.role !== "assistant") continue;
+    const content = item.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part && part.type === "output_text" && part.text) {
+        textParts.push(String(part.text).trim());
+      }
+    }
+  }
+  const combined = textParts.join("\n\n").trim();
+  if (!combined) return;
+  appendRealtimeTranscriptToTextOutputs("assistant-text", combined, msg);
 }
 
 function handleRealtimeDataChannelMessage(raw) {
@@ -2780,46 +3303,50 @@ function handleRealtimeDataChannelMessage(raw) {
   }
   if (!msg || typeof msg.type !== "string") return;
   if (msg.type === "error") {
+    const err = msg.error && typeof msg.error === "object" ? msg.error : {};
+    const m = String(/** @type {{ message?: string }} */ (err).message || msg.message || "").trim();
     console.warn("Realtime error event", msg);
+    if (m) showToast(`Realtime: ${m.slice(0, 220)}`);
     return;
   }
   if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
-    appendRealtimeTranscriptToTextOutputs("user-voice", msg.transcript);
+    appendRealtimeTranscriptToTextOutputs("user-voice", msg.transcript, msg);
     return;
   }
   if (msg.type === "response.output_audio_transcript.done" && msg.transcript) {
-    appendRealtimeTranscriptToTextOutputs("assistant-voice", msg.transcript);
+    appendRealtimeTranscriptToTextOutputs("assistant-voice", msg.transcript, msg);
     return;
   }
-  if (msg.type === "response.output_text.done" && msg.text) {
-    appendRealtimeTranscriptToTextOutputs("assistant-text", msg.text);
+  if (msg.type === "response.done") {
+    appendAssistantTextFromResponseDonePayload(msg);
+    handleRealtimeResponseDone(msg);
     return;
   }
 }
 
 function injectRunPreviewIntoOutputs(previewText) {
   const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  const trimmed = previewText.trim();
   if (textTargets.length === 1) {
-    textTargets[0].runPreview = previewText.trim();
+    textTargets[0].runPreview = trimmed;
+    delete textTargets[0]._transcriptLog;
     return;
   }
   if (textTargets.length > 1) {
-    const share =
-      previewText.trim().split("\n\n")[0] +
-      "\n\n(mock: multiple text outputs — showing same preview in each for now)";
     textTargets.forEach((b) => {
-      b.runPreview = share;
+      b.runPreview = trimmed;
+      delete b._transcriptLog;
     });
     return;
   }
 }
 
-function syncOutputPreviewFieldsFromState() {
+function syncOutputTextChatFromState() {
   state.blocks
     .filter((b) => b.role === "output" && b.typeId === "text")
     .forEach((b) => {
-      const el = document.querySelector(`textarea[data-run-preview-block="${b.id}"]`);
-      if (el) el.value = b.runPreview || "";
+      const el = document.querySelector(`[data-text-output-chat="${b.id}"]`);
+      if (el) fillTextOutputChatStream(el, b);
     });
 }
 
@@ -2836,12 +3363,10 @@ function updateRunChrome() {
   fab.setAttribute(
     "aria-label",
     running
-      ? state.runMode === "realtime"
-        ? "Realtime session active — click to stop"
-        : "Mock pipeline is running — click to stop"
-      : pipelineNeedsRealtime()
-        ? "Validate plan and start Realtime (WebRTC)"
-        : "Start mock pipeline run",
+      ? pipelineHasLiveAudioInput()
+        ? "Realtime session active — click to stop when you are done"
+        : "Realtime run — click to stop, or wait for the model to finish"
+      : "Validate plan and start Realtime (WebRTC)",
   );
   if (play) {
     play.style.display = running ? "none" : "";
@@ -2855,17 +3380,15 @@ function updateRunChrome() {
   const st = document.getElementById("status-bar-text");
   if (st) {
     if (running && state.runMode === "realtime") {
-      st.textContent =
-        "Realtime session — WebRTC to OpenAI using an ephemeral client secret from this origin. Click Running or Esc to end.";
-    } else if (running) {
-      st.textContent =
-        "Mock run active — edit fields in place; library locked. Click Running or Esc to end.";
-    } else if (pipelineNeedsRealtime()) {
+      st.textContent = pipelineHasLiveAudioInput()
+        ? "Realtime session — WebRTC to OpenAI. Click Running or Esc when you are done."
+        : "Realtime session — WebRTC to OpenAI. The run ends automatically when the model response completes.";
+    } else if (pipelineUsesLiveAudioModules()) {
       st.textContent =
         "Live-audio pipeline: Run validates the plan, then opens a Realtime WebRTC session when served from the workshop Node server (same origin).";
     } else {
       st.textContent =
-        "Run starts a continuous mock loop (no popup). Outputs refresh on a timer; stop anytime. No real models.";
+        "Run validates the plan and opens a Realtime WebRTC session (same origin as this Node server). Serve from `cd server && npm start` — static file hosting has no API.";
     }
   }
 }
@@ -2879,44 +3402,9 @@ function lockPalette(locked) {
   if (saveLay) saveLay.disabled = locked;
 }
 
-function applyRunTick() {
-  injectRunPreviewIntoOutputs(buildMockPreview(state.blocks));
-  syncOutputPreviewFieldsFromState();
-}
-
-function startMockRun() {
-  if (state.running || !state.blocks.length) return;
-  state.blocks.forEach((b) => stopBlockCapture(b.id));
-  audioLivePttToggleState.clear();
-  state.running = true;
-  state.runMode = "mock";
-  updateRunChrome();
-  lockPalette(true);
-  renderAll();
-  applyRunTick();
-  mockRunInterval = setInterval(applyRunTick, 2600);
-}
-
-function stopMockRun() {
-  if (!state.running) return;
-  releasePttCtrlHotkey();
-  state.running = false;
-  state.runMode = null;
-  audioLivePttToggleState.clear();
-  if (mockRunInterval) {
-    clearInterval(mockRunInterval);
-    mockRunInterval = null;
-  }
-  state.blocks.forEach((b) => stopBlockCapture(b.id));
-  updateRunChrome();
-  lockPalette(false);
-  renderAll();
-}
-
 function renderAll() {
   if (!state.blocks.length && state.running) {
-    if (state.runMode === "realtime") void stopRealtimeRun();
-    else stopMockRun();
+    void stopRealtimeRun();
   }
   renderMeta();
   renderPalette();
@@ -2931,81 +3419,16 @@ function showToast(message) {
   showToast._t = setTimeout(() => el.classList.remove("visible"), 3200);
 }
 
-function buildMockPreview(blocks) {
-  const lines = [];
-  const textOut = blocks.some((b) => b.role === "output" && b.typeId === "text");
-  const textIn = blocks.filter((b) => b.role === "input" && b.typeId === "text");
-  const snippet = textIn.length
-    ? String(textIn[0].values.content || "")
-        .trim()
-        .slice(0, 220)
-    : "";
-
-  const instr = blocks.find((b) => b.role === "process" && b.typeId === "instruction");
-  const sysBrief = instr ? String(instr.values.system || "").trim().slice(0, 160) : "";
-
-  if (textOut) {
-    lines.push("[assistant · mock]");
-    lines.push("");
-    if (snippet) {
-      lines.push("Acknowledged input (excerpt):");
-      lines.push(snippet + (String(textIn[0].values.content || "").length > 220 ? "…" : ""));
-      lines.push("");
-    }
-    if (sysBrief) {
-      lines.push("System instruction (excerpt):");
-      lines.push(sysBrief + (String(instr.values.system || "").length > 160 ? "…" : ""));
-      lines.push("");
-    }
-    if (instr) {
-      const mi = String(instr.values.maxIterations || "").trim();
-      const swFull = String(instr.values.stopWhen || "");
-      const sw = swFull.trim().slice(0, 120);
-      if (mi || sw) {
-        lines.push("Retry / loop (instruction module):");
-        if (mi) lines.push(`- max iterations: ${mi}`);
-        if (sw) lines.push(`- stop when: ${sw}${swFull.length > 120 ? "…" : ""}`);
-        lines.push("");
-      }
-    }
-    lines.push(
-      "Here is a fabricated reply. A real run would use your form values, retrieval, and tools end-to-end."
-    );
-    lines.push("");
-    lines.push("- Summary: simulated pass over the pipeline.");
-    lines.push("- Confidence: illustrative only (no model).");
-  } else if (blocks.some((b) => b.role === "output")) {
-    lines.push(
-      "[run preview · mock]\n\nThis pipeline has non-text outputs only. A full runner would show waveforms, image tiles, or stream panes here."
-    );
-  } else {
-    lines.push(
-      "[run preview · mock]\n\nNo output modules — add at least one output to see a richer preview stub."
-    );
-  }
-
-  lines.push("");
-  lines.push("— Fabricated telemetry —");
-  lines.push(`session: mock-${Math.random().toString(36).slice(2, 10)}`);
-  lines.push(`latency total: ${(180 + blocks.length * 95 + Math.floor(Math.random() * 120)).toFixed(0)} ms (fake)`);
-  return lines.join("\n");
-}
-
 async function toggleRunFromFab() {
   if (state.blocks.length === 0) {
     showToast("Pipeline is empty — add modules before a run would make sense.");
     return;
   }
   if (state.running) {
-    if (state.runMode === "realtime") await stopRealtimeRun();
-    else stopMockRun();
+    await stopRealtimeRun();
     return;
   }
-  if (pipelineNeedsRealtime()) {
-    await startRealtimeRun();
-  } else {
-    startMockRun();
-  }
+  await startRealtimeRun();
 }
 
 async function startRunFromHotkey() {
@@ -3014,11 +3437,7 @@ async function startRunFromHotkey() {
     showToast("Pipeline is empty — add modules before a run would make sense.");
     return;
   }
-  if (pipelineNeedsRealtime()) {
-    await startRealtimeRun();
-  } else {
-    startMockRun();
-  }
+  await startRealtimeRun();
 }
 
 function init() {
@@ -3033,8 +3452,7 @@ function init() {
   document.addEventListener("keydown", async (e) => {
     if (e.key === "Escape" && state.running) {
       e.preventDefault();
-      if (state.runMode === "realtime") void stopRealtimeRun();
-      else stopMockRun();
+      void stopRealtimeRun();
       return;
     }
 
@@ -3078,10 +3496,7 @@ function init() {
   });
 
   document.getElementById("btn-clear").addEventListener("click", () => {
-    if (state.running) {
-      if (state.runMode === "realtime") void stopRealtimeRun();
-      else stopMockRun();
-    }
+    if (state.running) void stopRealtimeRun();
     state.blocks.forEach((b) => stopBlockCapture(b.id));
     state.blocks = [];
     renderAll();
@@ -3092,7 +3507,7 @@ function init() {
   updateRunChrome();
 
   if (location.hash === "#demo-shot") {
-    injectRunPreviewIntoOutputs(buildMockPreview(state.blocks));
+    injectRunPreviewIntoOutputs("[#demo-shot layout placeholder]");
     renderAll();
   }
 }

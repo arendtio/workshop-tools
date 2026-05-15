@@ -3,7 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { validatePlan } from "./validatePlan.js";
 import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
-import { mintRealtimeClientSecret } from "./realtimeSession.js";
+import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./realtimeSession.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -34,17 +34,6 @@ export function createApp(opts) {
     if (!result.ok) {
       return res.status(400).json({ valid: false, errors: result.errors });
     }
-    if (result.mode !== "realtime") {
-      return res.status(400).json({
-        valid: false,
-        errors: [
-          {
-            code: "NOT_REALTIME",
-            message: "This pipeline does not include live audio modules; use the local mock run instead.",
-          },
-        ],
-      });
-    }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(503).json({
         valid: false,
@@ -55,11 +44,13 @@ export function createApp(opts) {
       const secret = await mintRealtimeClientSecret(result.plan);
       const base = (process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
       const client_events = buildRealtimeBootstrapClientEvents(result.plan);
+      const post_connect_session = buildRealtimePostConnectSession(result.plan);
       return res.json({
         valid: true,
         mode: "realtime",
         client_secret: { value: secret.value, expires_at: secret.expires_at },
         realtime_calls_url: `${base}/realtime/calls`,
+        post_connect_session,
         orchestration: { version: 1, client_events },
       });
     } catch (e) {

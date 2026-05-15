@@ -27,8 +27,17 @@ describe("HTTP API", () => {
     expect(res.body.valid).toBe(false);
   });
 
-  it("POST /api/realtime/client-secret rejects static pipelines", async () => {
+  it("POST /api/realtime/client-secret allows text-only pipelines when OpenAI succeeds", async () => {
     process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ value: "ek_from_openai", expires_at: 123 }),
+      })),
+    );
+
     const app = createApp({ staticRoot });
     const res = await request(app)
       .post("/api/realtime/client-secret")
@@ -41,8 +50,10 @@ describe("HTTP API", () => {
           ],
         },
       });
-    expect(res.status).toBe(400);
-    expect(res.body.valid).toBe(false);
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+    expect(res.body.client_secret.value).toBe("ek_from_openai");
+    expect(res.body.post_connect_session?.audio?.input?.turn_detection).toBeNull();
   });
 
   it("POST /api/realtime/client-secret returns 503 without API key", async () => {
@@ -89,6 +100,8 @@ describe("HTTP API", () => {
     expect(res.body.valid).toBe(true);
     expect(res.body.client_secret.value).toBe("ek_from_openai");
     expect(String(res.body.realtime_calls_url)).toContain("/realtime/calls");
+    expect(res.body.post_connect_session?.type).toBe("realtime");
+    expect(String(res.body.post_connect_session?.instructions || "")).toContain("Configured workshop outputs");
     expect(res.body.orchestration?.version).toBe(1);
     expect(Array.isArray(res.body.orchestration?.client_events)).toBe(true);
   });

@@ -1,10 +1,11 @@
-import { planUsesRealtime } from "./knownModules.js";
 import { buildFullRealtimeInstructions } from "./orchestrateRealtime.js";
 
-const DEFAULT_REALTIME_MODEL = "gpt-4o-mini-realtime-preview";
+/** GA Realtime model for WebRTC (`POST /v1/realtime/calls`); override via `OPENAI_REALTIME_MODEL`. */
+const DEFAULT_REALTIME_MODEL = "gpt-realtime-mini";
 
 /** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} plan */
 export function pickOutputModalities(plan) {
+  // Realtime WebRTC session allows only ["text"] or ["audio"], not both (API error invalid modalities).
   const wantsAudio = plan.blocks.some((b) => b.role === "output" && b.typeId === "audio-live");
   return wantsAudio ? ["audio"] : ["text"];
 }
@@ -17,11 +18,55 @@ export function pickVoice(plan) {
   return "marin";
 }
 
-/** @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} _plan */
+/**
+ * Semantic VAD matches stable browser WebRTC clients; PTT still gates capture via
+ * `MediaStreamTrack.enabled`.
+ * @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} _plan
+ */
 export function pickTurnDetection(_plan) {
-  // Workshop PTT gates audio in the browser (`MediaStreamTrack.enabled`). OpenAI still uses
-  // server VAD on whatever audio arrives; `turn_detection: null` would require manual commits.
-  return { type: "server_vad", create_response: true };
+  return { type: "semantic_vad", eagerness: "low", create_response: true };
+}
+
+/**
+ * Full `session` object for a client `session.update` after `session.created` (WebRTC).
+ * Minting `client_secrets` with only `{ type, model }` avoids baking config into the token.
+ *
+ * @param {{ blocks: unknown[] }} plan
+ * @param {{ model?: string }} [options]
+ */
+export function buildRealtimePostConnectSession(plan, options = {}) {
+  const model = options.model ?? process.env.OPENAI_REALTIME_MODEL ?? DEFAULT_REALTIME_MODEL;
+  const instructions = buildFullRealtimeInstructions(plan);
+  const voice = pickVoice(plan);
+  const output_modalities = pickOutputModalities(plan);
+
+  const hasLiveAudioIn = plan.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
+  const wantsInputTranscription = plan.blocks.some(
+    (b) => b.role === "input" && (b.typeId === "audio-live" || b.typeId === "audio-rec"),
+  );
+  const turn_detection = hasLiveAudioIn ? pickTurnDetection(plan) : null;
+  /** @type {Record<string, unknown>} */
+  const session = {
+    type: "realtime",
+    model,
+    instructions,
+    output_modalities,
+    audio: {
+      input: {},
+      output: { voice },
+    },
+  };
+  if (wantsInputTranscription) {
+    session.audio.input.transcription = {
+      model: process.env.OPENAI_REALTIME_INPUT_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
+    };
+  }
+  if (turn_detection === null) {
+    session.audio.input.turn_detection = null;
+  } else {
+    session.audio.input.turn_detection = turn_detection;
+  }
+  return session;
 }
 
 /**
@@ -29,12 +74,6 @@ export function pickTurnDetection(_plan) {
  * @param {{ apiKey?: string, baseUrl?: string, model?: string, fetchImpl?: typeof fetch }} [options]
  */
 export async function mintRealtimeClientSecret(plan, options = {}) {
-  if (!planUsesRealtime(plan.blocks)) {
-    const err = new Error("Plan does not use Realtime modules.");
-    err.code = "NOT_REALTIME";
-    throw err;
-  }
-
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   if (!apiKey) {
     const err = new Error("OPENAI_API_KEY is not set.");
@@ -49,36 +88,12 @@ export async function mintRealtimeClientSecret(plan, options = {}) {
   const model = options.model ?? process.env.OPENAI_REALTIME_MODEL ?? DEFAULT_REALTIME_MODEL;
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  const instructions = buildFullRealtimeInstructions(plan);
-  const voice = pickVoice(plan);
-  const turn_detection = pickTurnDetection(plan);
-  const output_modalities = pickOutputModalities(plan);
-
-  const hasLiveAudioIn = plan.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
-  const session = {
-    type: "realtime",
-    model,
-    instructions,
-    output_modalities,
-    audio: {
-      input: {},
-      output: { voice },
-    },
-  };
-  if (hasLiveAudioIn) {
-    session.audio.input.transcription = {
-      model: process.env.OPENAI_REALTIME_INPUT_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
-    };
-  }
-  if (turn_detection === null) {
-    session.audio.input.turn_detection = null;
-  } else {
-    session.audio.input.turn_detection = turn_detection;
-  }
-
   const body = {
     expires_after: { anchor: "created_at", seconds: 600 },
-    session,
+    session: {
+      type: "realtime",
+      model,
+    },
   };
 
   const url = `${base}/realtime/client_secrets`;

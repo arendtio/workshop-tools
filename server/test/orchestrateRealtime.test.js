@@ -36,6 +36,16 @@ describe("orchestrateRealtime", () => {
     expect(events[0].item.content[0].text).toContain("Hi");
   });
 
+  it("defers audio-rec input to the client (no bootstrap item)", () => {
+    const events = buildRealtimeBootstrapClientEvents({
+      blocks: [
+        { id: "a", role: "input", typeId: "audio-rec", values: { uploadStub: "", recordingStub: "x.webm" } },
+        { id: "o", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(events).toHaveLength(0);
+  });
+
   it("uses input_image for https image URLs", () => {
     const events = buildRealtimeBootstrapClientEvents({
       blocks: [
