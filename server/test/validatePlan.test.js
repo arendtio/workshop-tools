@@ -50,6 +50,23 @@ describe("validatePlan", () => {
     if (r.ok) expect(r.mode).toBe("static");
   });
 
+  it("accepts optional workshop session ids on the plan", () => {
+    const r = validatePlan({
+      version: 1,
+      toolingMockSessionId: "tm-1",
+      dynamicUiSessionId: "du-1",
+      blocks: [
+        { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
+        { id: "2", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.plan.toolingMockSessionId).toBe("tm-1");
+      expect(r.plan.dynamicUiSessionId).toBe("du-1");
+    }
+  });
+
   it("marks live audio pipelines as realtime", () => {
     const r = validatePlan({
       version: 1,
