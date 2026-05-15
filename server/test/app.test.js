@@ -105,4 +105,95 @@ describe("HTTP API", () => {
     expect(res.body.orchestration?.version).toBe(1);
     expect(Array.isArray(res.body.orchestration?.client_events)).toBe(true);
   });
+
+  it("POST /api/images/generate returns data_url when OpenAI succeeds", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        if (String(url).includes("/responses")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                output: [
+                  {
+                    type: "image_generation_call",
+                    status: "completed",
+                    result: "QUJD",
+                    revised_prompt: "rp",
+                  },
+                ],
+              }),
+          };
+        }
+        return { ok: false, status: 404, text: async () => "" };
+      }),
+    );
+
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/images/generate")
+      .send({
+        plan: {
+          version: 1,
+          blocks: [
+            { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
+            { id: "2", role: "output", typeId: "image", values: { size: "1024x1024" } },
+          ],
+        },
+        prompt: "a blue square",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data_url).toContain("base64,");
+    expect(res.body.revised_prompt).toBe("rp");
+  });
+
+  it("POST /api/images/generate forwards reference_images to OpenAI", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    let postedBody;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).includes("/responses")) {
+          postedBody = JSON.parse(String(init.body));
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                output: [
+                  {
+                    type: "image_generation_call",
+                    status: "completed",
+                    result: "QUJD",
+                  },
+                ],
+              }),
+          };
+        }
+        return { ok: false, status: 404, text: async () => "" };
+      }),
+    );
+
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/images/generate")
+      .send({
+        plan: {
+          version: 1,
+          blocks: [
+            { id: "i1", role: "input", typeId: "image", values: { imageSource: "file", uploadStub: "x.png" } },
+            { id: "2", role: "output", typeId: "image", values: { size: "1024x1024" } },
+          ],
+        },
+        prompt: "make it blue",
+        reference_images: [{ block_id: "i1", image_url: "data:image/png;base64,QUJD" }],
+      });
+    expect(res.status).toBe(200);
+    const content = postedBody.input?.[0]?.content;
+    expect(content.some((c) => c.type === "input_image" && c.image_url.startsWith("data:image/png"))).toBe(true);
+  });
 });

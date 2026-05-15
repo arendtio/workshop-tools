@@ -519,6 +519,39 @@ button.chip:hover {
   font-style: italic;
 }
 
+.field-compact-checkbox {
+  margin-top: 0.1rem;
+}
+
+.field label.field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: auto;
+  font-size: 0.65rem;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin: 0;
+}
+
+.field label.field-checkbox input[type="checkbox"] {
+  margin: 0;
+  width: 0.85rem;
+  height: 0.85rem;
+  min-width: 0.85rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.field-checkbox span {
+  flex: 1;
+}
+
 .dropzone {
   border: 1px dashed var(--border);
   border-radius: 4px;
@@ -628,12 +661,12 @@ button.chip:hover {
   gap: 0.45rem;
 }
 
-.field.field-compact label {
+.field.field-compact label:not(.field-checkbox) {
   font-size: 0.65rem;
   margin-bottom: 0.18rem;
 }
 
-.field.field-compact input,
+.field.field-compact input:not([type="checkbox"]),
 .field.field-compact textarea,
 .field.field-compact select {
   font-size: 0.76rem;
@@ -682,7 +715,7 @@ button.chip:hover {
   color: var(--text-muted);
 }
 
-.field label {
+.field label:not(.field-checkbox) {
   display: block;
   font-size: 0.72rem;
   font-weight: 600;
@@ -690,7 +723,7 @@ button.chip:hover {
   margin-bottom: 0.28rem;
 }
 
-.field input,
+.field input:not([type="checkbox"]),
 .field textarea,
 .field select {
   width: 100%;
@@ -709,7 +742,7 @@ button.chip:hover {
   line-height: 1.45;
 }
 
-.field input:focus,
+.field input:not([type="checkbox"]):focus,
 .field textarea:focus,
 .field select:focus {
   outline: 2px solid var(--accent);
@@ -1322,6 +1355,44 @@ footer.status-bar {
   gap: 0.4rem;
 }
 
+.output-image-progress {
+  width: 100%;
+  max-width: min(280px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.output-image-progress-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+
+.output-image-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.12);
+  overflow: hidden;
+  width: 100%;
+}
+
+.output-image-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  transition: width 0.18s ease-out;
+}
+
+.output-image-progress-hint {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.25;
+}
+
 .output-image-placeholder {
   display: flex;
   align-items: center;
@@ -1348,6 +1419,42 @@ footer.status-bar {
 .output-image-placeholder-sub {
   font-size: 0.65rem;
   color: var(--text-muted);
+}
+
+.output-image-result-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+}
+
+.output-image-result-wrap.is-regenerating {
+  opacity: 0.45;
+  filter: grayscale(0.15);
+}
+
+.output-image-stage .output-image-progress {
+  width: 100%;
+  max-width: min(280px, 100%);
+  margin-bottom: 0.35rem;
+}
+
+.output-image-result {
+  max-width: 100%;
+  width: auto;
+  max-height: 320px;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
+.output-image-result-caption {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 @media (max-width: 520px) {

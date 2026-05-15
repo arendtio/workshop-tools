@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { validatePlan } from "./validatePlan.js";
 import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
 import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./realtimeSession.js";
+import { generateWorkshopImageFromPlan } from "./imageGeneration.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +15,8 @@ export function createApp(opts) {
   const { staticRoot } = opts;
   const app = express();
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "2mb" }));
+  /** File uploads as data URLs on `/api/images/generate` need a larger body than plan JSON alone. */
+  app.use(express.json({ limit: "12mb" }));
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "workshop-server" });
@@ -59,6 +61,47 @@ export function createApp(opts) {
       return res.status(status).json({
         valid: false,
         errors: [{ code: e.code || "OPENAI", message: e.message || "OpenAI request failed" }],
+      });
+    }
+  });
+
+  app.post("/api/images/generate", async (req, res) => {
+    const planBody = req.body?.plan ?? req.body;
+    const prompt = req.body?.prompt;
+    const result = validatePlan(planBody);
+    if (!result.ok) {
+      return res.status(400).json({ ok: false, errors: result.errors });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({
+        ok: false,
+        error: "NO_API_KEY",
+        message: "Server is missing OPENAI_API_KEY.",
+      });
+    }
+    const p = String(prompt ?? "").trim();
+    if (!p) {
+      return res.status(400).json({ ok: false, error: "EMPTY_PROMPT", message: "Missing prompt." });
+    }
+    try {
+      const out = await generateWorkshopImageFromPlan(result.plan, p, {
+        referenceImages: req.body?.reference_images,
+      });
+      return res.json({ ok: true, data_url: out.data_url, revised_prompt: out.revised_prompt ?? null });
+    } catch (e) {
+      const code = /** @type {{ code?: string }} */ (e).code;
+      if (code === "NO_IMAGE_OUTPUT") {
+        return res.status(400).json({ ok: false, error: code, message: e.message || "No output:image in plan." });
+      }
+      if (code === "EMPTY_PROMPT") {
+        return res.status(400).json({ ok: false, error: code, message: e.message });
+      }
+      const st = typeof e.status === "number" ? e.status : NaN;
+      const status = st >= 400 && st < 600 ? st : 502;
+      return res.status(status).json({
+        ok: false,
+        error: code || "OPENAI_IMAGE",
+        message: e.message || "Image generation failed.",
       });
     }
   });

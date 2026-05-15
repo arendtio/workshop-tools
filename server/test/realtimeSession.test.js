@@ -109,6 +109,19 @@ describe("buildRealtimePostConnectSession", () => {
     expect(String(session.instructions)).toContain("Configured workshop outputs");
     expect(session.output_modalities).toEqual(["text"]);
   });
+
+  it("registers workshop_generate_image when output:image is present", () => {
+    const session = buildRealtimePostConnectSession({
+      blocks: [
+        { role: "input", typeId: "text", values: { content: "hi" } },
+        { role: "output", typeId: "text", values: {} },
+        { role: "output", typeId: "image", values: { size: "1024x1024" } },
+      ],
+    });
+    expect(session.tool_choice).toBe("auto");
+    expect(Array.isArray(session.tools)).toBe(true);
+    expect(session.tools?.[0]).toMatchObject({ type: "function", name: "workshop_generate_image" });
+  });
 });
 
 describe("mintRealtimeClientSecret", () => {

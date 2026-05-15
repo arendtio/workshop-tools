@@ -179,6 +179,7 @@ const FORM_SCHEMA = {
       imageSource: "file",
       imageUrl: "",
       uploadStub: "",
+      scaleTo512: "1",
     },
     fields: [
       {
@@ -199,17 +200,18 @@ const FORM_SCHEMA = {
         showWhen: { key: "imageSource", is: "file" },
       },
       {
+        key: "scaleTo512",
+        label: "",
+        type: "checkbox",
+        checkboxLabel: "Auf maximal 512 Pixel skalieren",
+        showWhen: { key: "imageSource", is: "file" },
+      },
+      {
         key: "imageUrl",
         label: "Image URL (https)",
         type: "text",
         placeholder: "https://…",
         showWhen: { key: "imageSource", is: "url" },
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Workshop: most people upload a file; your backend maps it to `image_url` or a hosted URL.",
       },
     ],
   },
@@ -436,7 +438,7 @@ const FORM_SCHEMA = {
   },
   "output:image": {
     apiMapping:
-      "POST `/v1/images/generations` — size and other parameters are chosen server-side; this block keeps workshop framing only.",
+      "Server: `POST /v1/responses` with the `image_generation` tool (orchestration model + reference URLs from input:image when HTTPS). Size is chosen from this block.",
     defaults: {
       size: "1024x1024",
     },
@@ -487,7 +489,7 @@ const FORM_SCHEMA = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant', label: string, body: string }[] }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
@@ -508,6 +510,12 @@ let realtimeDataChannel = null;
  * Live microphone pipelines stay running until the user stops them.
  */
 let realtimeRunAutoStop = false;
+
+/** Image tool `/api/images/generate` — linear progress bar target (UI estimate only). */
+const IMAGE_GEN_PROGRESS_TARGET_MS = 70_000;
+/** @type {ReturnType<typeof setInterval> | null} */
+let imageGenProgressTimer = null;
+let imageGenProgressStartedAt = 0;
 
 /**
  * Explicit STUN helps Firefox/Chrome keep ICE consent refreshes working through NAT;
@@ -567,6 +575,19 @@ function pipelineHasLiveAudioInput() {
 }
 
 const REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS = 12_000_000;
+
+/** Guard for `input_image` data URLs on the Realtime data channel (character count incl. prefix). */
+const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
+
+/**
+ * Target max encoded size when auto-scaling to 512 px (empirical Realtime data-channel limit ~10k chars).
+ */
+const REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS = 10_000;
+
+/**
+ * Target max encoded size for full multi-step compression (checkbox off).
+ */
+const REALTIME_INPUT_IMAGE_TARGET_MAX_DATA_URL_CHARS = 900_000;
 
 /**
  * @param {AudioBuffer} ab
@@ -671,6 +692,193 @@ function sendRealtimeUserTextItem(dc, text) {
 }
 
 /**
+ * @param {{ values?: Record<string, string> }} block
+ * @returns {boolean}
+ */
+function imageInputScaleTo512Enabled(block) {
+  const v = block.values?.scaleTo512;
+  if (v === undefined || v === null || v === "") return true;
+  return v === "1" || v === "true";
+}
+
+/**
+ * Re-encode to JPEG and cap dimensions so `input_image` fits Realtime data-channel frames.
+ * @param {Blob} blob
+ * @param {{ scaleTo512?: boolean }} [options]
+ * @returns {Promise<Blob>}
+ */
+async function compressImageBlobForRealtimeChannel(blob, options = {}) {
+  if (!(blob instanceof Blob) || blob.size < 1) return blob;
+  const scaleTo512 = !!options.scaleTo512;
+  const sizeTarget = scaleTo512
+    ? REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS
+    : REALTIME_INPUT_IMAGE_TARGET_MAX_DATA_URL_CHARS;
+  let bmp;
+  try {
+    bmp = await createImageBitmap(blob);
+  } catch (err) {
+    console.warn("createImageBitmap failed; sending original blob (may be too large)", err);
+    return blob;
+  }
+  try {
+    const attempts = scaleTo512
+      ? [
+          { maxSide: 512, q: 0.72 },
+          { maxSide: 512, q: 0.55 },
+          { maxSide: 512, q: 0.4 },
+        ]
+      : [
+          { maxSide: 1536, q: 0.82 },
+          { maxSide: 1152, q: 0.74 },
+          { maxSide: 896, q: 0.66 },
+          { maxSide: 640, q: 0.58 },
+        ];
+    /** @type {Blob | null} */
+    let smallest = null;
+    let smallestLen = Infinity;
+    for (const { maxSide, q } of attempts) {
+      const w = bmp.width;
+      const h = bmp.height;
+      const scale = Math.min(1, maxSide / Math.max(w, h));
+      const tw = Math.max(1, Math.round(w * scale));
+      const th = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = tw;
+      canvas.height = th;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) break;
+      ctx.drawImage(bmp, 0, 0, tw, th);
+      const jpegBlob = await new Promise((res) => {
+        canvas.toBlob((b) => res(b), "image/jpeg", q);
+      });
+      if (!(jpegBlob instanceof Blob) || jpegBlob.size < 1) continue;
+      const du = await readBlobAsDataUrl(jpegBlob);
+      if (du.length < smallestLen) {
+        smallestLen = du.length;
+        smallest = jpegBlob;
+      }
+      if (du.length <= sizeTarget) {
+        return jpegBlob;
+      }
+    }
+    return smallest instanceof Blob ? smallest : blob;
+  } finally {
+    bmp.close();
+  }
+}
+
+/**
+ * @param {Blob} blob
+ * @returns {Promise<string>}
+ */
+function readBlobAsDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(typeof r.result === "string" ? r.result : "");
+    r.onerror = () => reject(r.error || new Error("read failed"));
+    r.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Full-resolution references for `/api/images/generate` (not the 512 px Realtime preview).
+ * @returns {Promise<{ block_id: string, image_url: string }[]>}
+ */
+async function collectInputImageReferencesForGeneration() {
+  /** @type {{ block_id: string, image_url: string }[]} */
+  const refs = [];
+  for (const b of state.blocks) {
+    if (b.role !== "input" || b.typeId !== "image") continue;
+    const src = String(b.values?.imageSource ?? "file");
+    if (src === "url") {
+      const u = String(b.values?.imageUrl ?? "").trim();
+      if (u.startsWith("https://")) refs.push({ block_id: b.id, image_url: u });
+      continue;
+    }
+    const blob = b._inputImageBlob;
+    if (!(blob instanceof Blob) || blob.size < 1) continue;
+    try {
+      const dataUrl = await readBlobAsDataUrl(blob);
+      if (dataUrl.startsWith("data:image/")) {
+        refs.push({ block_id: b.id, image_url: dataUrl });
+      }
+    } catch (err) {
+      console.warn("Could not read input image for generation", b.id, err);
+    }
+  }
+  return refs;
+}
+
+async function sendRealtimeInputImageBlock(dc, block) {
+  const label = `Input · image (${block.id})`;
+  const blob = block._inputImageBlob;
+  if (!(blob instanceof Blob) || blob.size < 1) {
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(No image file loaded in this browser session — choose a file in the image input module before Run.)`,
+    );
+    return;
+  }
+
+  const scale512 = imageInputScaleTo512Enabled(block);
+  const inputText = `${label} (local file, attached as input_image)`;
+
+  let dataUrl;
+  try {
+    const compressed = await compressImageBlobForRealtimeChannel(blob, { scaleTo512: scale512 });
+    dataUrl = await readBlobAsDataUrl(compressed);
+  } catch (err) {
+    console.warn("Image read failed", err);
+    showToast("Could not read image file.");
+    sendRealtimeUserTextItem(dc, `${label}\n(Image read failed in the browser.)`);
+    return;
+  }
+
+  if (!dataUrl.startsWith("data:image/")) {
+    sendRealtimeUserTextItem(dc, `${label}\n(Selected file is not a supported image type.)`);
+    return;
+  }
+  if (dataUrl.length > REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS) {
+    showToast("Image still too large after compression — use a smaller source or an HTTPS URL.");
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(Image still too large after browser compression for the Realtime data channel.)`,
+    );
+    return;
+  }
+  if (dataUrl.length > REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS) {
+    console.warn(
+      `[workshop] Realtime input_image data URL is ${dataUrl.length} chars (>${REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS}); vision may fail on the data channel.`,
+    );
+  }
+
+  const imageDetail = scale512 ? "low" : "auto";
+
+  try {
+    dc.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: inputText },
+            { type: "input_image", image_url: dataUrl, detail: imageDetail },
+          ],
+        },
+      }),
+    );
+  } catch (err) {
+    console.warn("Realtime input_image send failed", err);
+    showToast("Could not send image to Realtime (message too large or channel closed).");
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(Image could not be sent on the data channel — try a smaller image or an HTTPS URL.)`,
+    );
+  }
+}
+
+/**
  * @param {RTCDataChannel} dc
  * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, _recordedAudioBlob?: Blob | null }} block
  */
@@ -717,7 +925,8 @@ async function sendRealtimeAudioRecBlock(dc, block) {
 }
 
 /**
- * Preserve pipeline input order: walk blocks and interleave `audio-rec` (client) with other inputs from server bootstrap.
+ * Preserve pipeline input order: walk blocks and interleave `audio-rec` and file `input:image`
+ * (client-attached bytes) with server bootstrap events.
  * @param {RTCDataChannel} dc
  * @param {object[]} bootstrapEvents
  */
@@ -728,6 +937,10 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
     if (b.typeId === "audio-live") continue;
     if (b.typeId === "audio-rec") {
       await sendRealtimeAudioRecBlock(dc, b);
+      continue;
+    }
+    if (b.typeId === "image" && String(b.values?.imageSource ?? "file") === "file") {
+      await sendRealtimeInputImageBlock(dc, b);
       continue;
     }
     if (bi < bootstrapEvents.length) {
@@ -770,6 +983,7 @@ function isTypingInField(el) {
 }
 
 async function stopRealtimeRun() {
+  stopImageGenerationProgressUi();
   releasePttCtrlHotkey();
   realtimeRunAutoStop = false;
   realtimeDataChannel = null;
@@ -838,10 +1052,15 @@ async function startRealtimeRun() {
     }
 
     realtimeRunAutoStop = !pipelineHasLiveAudioInput();
+    stopImageGenerationProgressUi();
     for (const b of state.blocks) {
       if (b.role === "output" && b.typeId === "text") {
         b.runPreview = "";
         b._transcriptLog = [];
+      }
+      if (b.role === "output" && b.typeId === "image") {
+        delete b._runImageDataUrl;
+        delete b._runImageGenerating;
       }
     }
     seedTextOutputTranscriptLogsFromPipeline();
@@ -889,12 +1108,14 @@ async function startRealtimeRun() {
         } catch (e) {
           console.warn("Realtime bootstrap merge failed", e);
         }
-        try {
-          if (dc.readyState === "open") {
-            dc.send(JSON.stringify({ type: "response.create" }));
+        if (!pipelineHasLiveAudioInput()) {
+          try {
+            if (dc.readyState === "open") {
+              dc.send(JSON.stringify({ type: "response.create" }));
+            }
+          } catch (err) {
+            console.warn("Realtime response.create send failed", err);
           }
-        } catch (err) {
-          console.warn("Realtime response.create send failed", err);
         }
       })();
     };
@@ -1442,11 +1663,12 @@ function renderDropzoneField(field, block, disabled, wrap) {
     if (block.typeId === "audio-rec") {
       block._recordedAudioBlob = f || null;
     }
+    if (block.typeId === "image") {
+      block._inputImageBlob = f || null;
+    }
   });
 
-  zone.addEventListener("click", () => {
-    if (!disabled) inp.click();
-  });
+  /* File input already covers the zone (see `.dropzone-input { inset:0 }`); do not call `inp.click()` here or the picker opens twice. */
 
   function highlight(on) {
     zone.classList.toggle("is-dragover", on);
@@ -1475,6 +1697,9 @@ function renderDropzoneField(field, block, disabled, wrap) {
       if (block.typeId === "audio-rec") {
         block._recordedAudioBlob = f;
       }
+      if (block.typeId === "image") {
+        block._inputImageBlob = f;
+      }
     }
   });
 
@@ -1497,6 +1722,9 @@ function renderSegmentedField(field, block, disabled, wrap) {
       e.preventDefault();
       e.stopPropagation();
       block.values[field.key] = opt.value;
+      if (field.key === "imageSource" && block.typeId === "image" && opt.value === "url") {
+        delete block._inputImageBlob;
+      }
       renderAll();
     });
     bar.appendChild(b);
@@ -1914,6 +2142,31 @@ function gatherConversationSnapshotForTextOutput() {
           body,
           empty: !(draft || staged),
         });
+      } else if (b.typeId === "image") {
+        const src = String(b.values.imageSource ?? "file");
+        const url = String(b.values.imageUrl || "").trim();
+        const stub = String(b.values.uploadStub || "").trim();
+        const blob = b._inputImageBlob;
+        if (src === "url") {
+          body = url
+            ? url.startsWith("https://")
+              ? `Image URL (HTTPS): ${url}`
+              : `Non-HTTPS URL (not sent to the model): ${url}`
+            : "(empty URL)";
+        } else {
+          const ready = blob instanceof Blob && blob.size > 0;
+          const scale512 = imageInputScaleTo512Enabled(b);
+          body = ready
+            ? `${stub || "image"} — ${blob.size} bytes${scale512 ? ", wird auf 512 px für Realtime skaliert" : ", wird für Realtime komprimiert"}`
+            : stub
+              ? `${stub} — pick the file again before Run if vision is missing`
+              : "(no file selected)";
+        }
+        userTurns.push({
+          label: `Input · ${partTitle}`,
+          body,
+          empty: src === "url" ? !url.startsWith("https://") : !(blob instanceof Blob && blob.size > 0),
+        });
       } else {
         const url = b.values.imageUrl && String(b.values.imageUrl).trim();
         const up =
@@ -1984,6 +2237,27 @@ function rebuildRunPreviewFromLog(block) {
     .trimEnd();
 }
 
+/**
+ * Tool and other system events in the text-output transcript (visible when “Show system messages” is on).
+ * @param {string} label
+ * @param {string} body
+ * @param {string} dedupeKey
+ */
+function appendSystemTranscriptToTextOutputs(label, body, dedupeKey) {
+  const text = String(body || "").trim();
+  if (!text) return;
+  const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
+  if (!textTargets.length) return;
+  const entry = { key: dedupeKey, role: /** @type {const} */ ("system"), label, body: text };
+  for (const b of textTargets) {
+    const log = ensureTranscriptLog(b);
+    if (log.some((e) => e.key === dedupeKey)) continue;
+    log.push({ ...entry });
+    rebuildRunPreviewFromLog(b);
+  }
+  syncOutputTextChatFromState();
+}
+
 /** Seed visible user-side pipeline inputs once per run so the log matches the server bootstrap. */
 function seedTextOutputTranscriptLogsFromPipeline() {
   const inputs = state.blocks.filter((b) => b.role === "input");
@@ -2029,7 +2303,8 @@ function transcriptRowsForTextOutputBlock(block, snap, showSystem) {
   const log = Array.isArray(block._transcriptLog) ? block._transcriptLog : [];
   if (log.length > 0) {
     for (const e of log) {
-      const role = e.role === "user" ? "user" : "assistant";
+      if (e.role === "system" && !showSystem) continue;
+      const role = e.role === "user" ? "user" : e.role === "system" ? "system" : "assistant";
       rows.push({ role, meta: e.label, body: e.body });
     }
     return rows;
@@ -2191,38 +2466,136 @@ function renderOutputTextModule(block, card, schema) {
   card.appendChild(form);
 }
 
+function stopImageGenerationProgressUi() {
+  if (imageGenProgressTimer != null) {
+    clearInterval(imageGenProgressTimer);
+    imageGenProgressTimer = null;
+  }
+  imageGenProgressStartedAt = 0;
+  for (const b of state.blocks) {
+    if (b.role === "output" && b.typeId === "image") {
+      delete b._runImageGenerating;
+    }
+  }
+}
+
+function syncImageGenerationProgressFill() {
+  if (!imageGenProgressStartedAt) return;
+  const elapsed = Date.now() - imageGenProgressStartedAt;
+  const pct = Math.min(100, (elapsed / IMAGE_GEN_PROGRESS_TARGET_MS) * 100);
+  for (const el of document.querySelectorAll(".output-image-progress-fill")) {
+    el.style.width = `${pct}%`;
+    const track = el.parentElement;
+    if (track && track.classList.contains("output-image-progress-track")) {
+      track.setAttribute("aria-valuenow", String(Math.round(pct)));
+    }
+  }
+  if (pct >= 100 && imageGenProgressTimer != null) {
+    clearInterval(imageGenProgressTimer);
+    imageGenProgressTimer = null;
+  }
+}
+
+function startImageGenerationProgressUi() {
+  stopImageGenerationProgressUi();
+  imageGenProgressStartedAt = Date.now();
+  for (const b of state.blocks) {
+    if (b.role === "output" && b.typeId === "image") {
+      b._runImageGenerating = true;
+    }
+  }
+  renderAll();
+  imageGenProgressTimer = setInterval(syncImageGenerationProgressFill, 200);
+  syncImageGenerationProgressFill();
+}
+
+/**
+ * @param {HTMLElement} parent
+ */
+function appendImageGenerationProgress(parent) {
+  const prog = document.createElement("div");
+  prog.className = "output-image-progress";
+  const progLabel = document.createElement("div");
+  progLabel.className = "output-image-progress-label";
+  progLabel.textContent = "Generating image…";
+  const track = document.createElement("div");
+  track.className = "output-image-progress-track";
+  track.setAttribute("role", "progressbar");
+  track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", "100");
+  track.setAttribute("aria-valuenow", "0");
+  track.setAttribute("aria-label", "Image generation progress");
+  const fill = document.createElement("div");
+  fill.className = "output-image-progress-fill";
+  track.appendChild(fill);
+  prog.appendChild(progLabel);
+  prog.appendChild(track);
+  const hint = document.createElement("div");
+  hint.className = "output-image-progress-hint";
+  hint.textContent = "Bar reaches 100% at ~70s (estimate).";
+  prog.appendChild(hint);
+  parent.appendChild(prog);
+}
+
 function appendImageOutputPlaceholder(block, card) {
   const stage = document.createElement("div");
   stage.className = "output-image-stage";
 
-  const ph = document.createElement("div");
-  ph.className = "output-image-placeholder";
+  const dataUrl = block._runImageDataUrl && String(block._runImageDataUrl).trim();
+  const generating = !!block._runImageGenerating;
 
-  const size = String(block.values.size || "1024x1024").trim();
-  const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size);
-  const maxPx = 200;
-  if (m) {
-    const iw = Number(m[1]);
-    const ih = Number(m[2]);
-    const scale = Math.min(maxPx / iw, maxPx / ih, 1);
-    ph.style.width = `${Math.round(iw * scale)}px`;
-    ph.style.height = `${Math.round(ih * scale)}px`;
-  } else {
-    ph.style.width = `${maxPx}px`;
-    ph.style.minHeight = "160px";
+  if (generating) {
+    appendImageGenerationProgress(stage);
   }
 
-  const cap = document.createElement("span");
-  cap.className = "output-image-placeholder-cap";
-  cap.textContent = "Generated image";
-  ph.appendChild(cap);
+  if (dataUrl) {
+    const wrap = document.createElement("div");
+    wrap.className = "output-image-result-wrap" + (generating ? " is-regenerating" : "");
+    const img = document.createElement("img");
+    img.className = "output-image-result";
+    img.alt = "Generated image";
+    img.src = dataUrl;
+    wrap.appendChild(img);
+    if (!generating) {
+      const cap = document.createElement("div");
+      cap.className = "output-image-result-caption";
+      cap.textContent = "Generated in this session (workshop_generate_image)";
+      wrap.appendChild(cap);
+    }
+    stage.appendChild(wrap);
+  }
 
-  const sub = document.createElement("span");
-  sub.className = "output-image-placeholder-sub";
-  sub.textContent = `${size} · preview after run`;
+  if (!dataUrl && !generating) {
+    const ph = document.createElement("div");
+    ph.className = "output-image-placeholder";
 
-  stage.appendChild(ph);
-  stage.appendChild(sub);
+    const size = String(block.values.size || "1024x1024").trim();
+    const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size);
+    const maxPx = 200;
+    if (m) {
+      const iw = Number(m[1]);
+      const ih = Number(m[2]);
+      const scale = Math.min(maxPx / iw, maxPx / ih, 1);
+      ph.style.width = `${Math.round(iw * scale)}px`;
+      ph.style.height = `${Math.round(ih * scale)}px`;
+    } else {
+      ph.style.width = `${maxPx}px`;
+      ph.style.minHeight = "160px";
+    }
+
+    const cap = document.createElement("span");
+    cap.className = "output-image-placeholder-cap";
+    cap.textContent = "Generated image";
+    ph.appendChild(cap);
+
+    const sub = document.createElement("span");
+    sub.className = "output-image-placeholder-sub";
+    sub.textContent = `${size} · ask the model to generate (Realtime tool)`;
+
+    stage.appendChild(ph);
+    stage.appendChild(sub);
+  }
+
   card.appendChild(stage);
 }
 
@@ -2974,7 +3347,7 @@ function renderModuleCard(block, container) {
       return;
     }
 
-    if (field.label) {
+    if (field.label && field.type !== "checkbox") {
       const lab = document.createElement("label");
       lab.htmlFor = fid;
       lab.textContent = field.label;
@@ -3031,6 +3404,23 @@ function renderModuleCard(block, container) {
         }
       });
       wrap.appendChild(sel);
+    } else if (field.type === "checkbox") {
+      wrap.classList.add("field-compact-checkbox");
+      const row = document.createElement("label");
+      row.className = "field-checkbox";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = fid;
+      cb.disabled = locked;
+      cb.checked = val === "1" || val === "true" || (val === "" && schema.defaults[field.key] === "1");
+      cb.addEventListener("change", () => {
+        block.values[field.key] = cb.checked ? "1" : "0";
+      });
+      const span = document.createElement("span");
+      span.textContent = field.checkboxLabel || field.label || field.key;
+      row.appendChild(cb);
+      row.appendChild(span);
+      wrap.appendChild(row);
     } else if (field.type === "dropzone") {
       renderDropzoneField(field, block, locked, wrap);
     } else if (field.type === "camera_preview") {
@@ -3206,24 +3596,24 @@ function appendRealtimeTranscriptToTextOutputs(kind, text, src = {}) {
 }
 
 /**
- * End one-shot runs when the model finishes, and chain stub tool outputs so the session can continue.
- * Pipelines with a live microphone input never auto-stop (conversation stays open).
+ * After each `response.done`: run function-call tool chain for all sessions; auto-stop only when
+ * `realtimeRunAutoStop` and the response had no tool calls to chain.
  * @param {Record<string, unknown>} msg
  */
-function handleRealtimeResponseDone(msg) {
-  if (!realtimeRunAutoStop || !state.running || state.runMode !== "realtime") return;
+async function handleRealtimeResponseDone(msg) {
+  if (!state.running || state.runMode !== "realtime") return;
   const dc = realtimeDataChannel;
   if (!dc || dc.readyState !== "open") return;
 
   const resp = msg.response;
   if (!resp || typeof resp !== "object") {
-    void stopRealtimeRun();
+    if (realtimeRunAutoStop) void stopRealtimeRun();
     return;
   }
 
   const status = /** @type {string} */ (resp.status);
   if (status === "failed" || status === "cancelled") {
-    void stopRealtimeRun();
+    if (realtimeRunAutoStop) void stopRealtimeRun();
     return;
   }
 
@@ -3240,33 +3630,118 @@ function handleRealtimeResponseDone(msg) {
         ).trim();
         if (!callId) continue;
         const name = String(/** @type {{ name?: string }} */ (fc).name || "").trim();
-        const stubOutput = JSON.stringify({
-          ok: false,
-          error: "workshop_tool_not_wired",
-          name,
-          message:
-            "This Realtime tool call is not executed in the browser yet. Implement it on the workshop server or extend the client runner.",
-        });
+        /** @type {string} */
+        let outStr;
+        if (name === "workshop_generate_image") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const prompt = String(args.prompt || "").trim();
+          if (!prompt) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_generate_image",
+              "Call skipped — no prompt in tool arguments.",
+              `tool:${callId}:skip`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "missing_prompt" });
+          } else {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_generate_image",
+              `Calling image generation…\n\n${prompt}`,
+              `tool:${callId}:start`,
+            );
+            startImageGenerationProgressUi();
+            try {
+              const reference_images = await collectInputImageReferencesForGeneration();
+              const res = await fetch("/api/images/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  plan: serializePipelinePlan(),
+                  prompt,
+                  reference_images,
+                }),
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || !data.ok) {
+                const detail = data.message || data.error || res.statusText || "request failed";
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_generate_image",
+                  `Failed: ${String(detail)}`,
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({ ok: false, error: "image_request_failed", message: String(detail) });
+                showToast(`Image tool: ${String(detail).slice(0, 160)}`);
+              } else if (data.data_url) {
+                state.blocks
+                  .filter((b) => b.role === "output" && b.typeId === "image")
+                  .forEach((b) => {
+                    b._runImageDataUrl = data.data_url;
+                  });
+                const doneMsg = data.revised_prompt
+                  ? `Completed — image shown in output.\n\nRevised prompt: ${data.revised_prompt}`
+                  : "Completed — image shown in output.";
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_generate_image",
+                  doneMsg,
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({
+                  ok: true,
+                  revised_prompt: data.revised_prompt || undefined,
+                  message: "Image is shown in the workshop image output.",
+                });
+              } else {
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_generate_image",
+                  "Failed: server returned no image data.",
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({ ok: false, error: "no_data_url" });
+              }
+            } finally {
+              stopImageGenerationProgressUi();
+            }
+            renderAll();
+          }
+        } else {
+          appendSystemTranscriptToTextOutputs(
+            `Tool · ${name || "unknown"}`,
+            "This tool is not wired in the workshop client yet.",
+            `tool:${callId}:unwired`,
+          );
+          outStr = JSON.stringify({
+            ok: false,
+            error: "workshop_tool_not_wired",
+            name,
+            message:
+              "This Realtime tool call is not executed in the browser yet. Implement it on the workshop server or extend the client runner.",
+          });
+        }
         dc.send(
           JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "function_call_output",
               call_id: callId,
-              output: stubOutput,
+              output: outStr,
             },
           }),
         );
       }
       dc.send(JSON.stringify({ type: "response.create" }));
     } catch (err) {
-      console.warn("Realtime tool stub chain failed", err);
+      console.warn("Realtime tool chain failed", err);
+      stopImageGenerationProgressUi();
       void stopRealtimeRun();
     }
     return;
   }
 
-  void stopRealtimeRun();
+  if (realtimeRunAutoStop) void stopRealtimeRun();
 }
 
 /**
@@ -3319,7 +3794,7 @@ function handleRealtimeDataChannelMessage(raw) {
   }
   if (msg.type === "response.done") {
     appendAssistantTextFromResponseDonePayload(msg);
-    handleRealtimeResponseDone(msg);
+    void handleRealtimeResponseDone(msg);
     return;
   }
 }

@@ -46,6 +46,34 @@ describe("orchestrateRealtime", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("defers file-based image input to the client (no bootstrap item)", () => {
+    const events = buildRealtimeBootstrapClientEvents({
+      blocks: [
+        {
+          id: "img",
+          role: "input",
+          typeId: "image",
+          values: { imageSource: "file", uploadStub: "photo.jpg", imageUrl: "" },
+        },
+        { id: "o", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(events).toHaveLength(0);
+  });
+
+  it("tells the model to defer image tool until live user instructions", () => {
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        { role: "input", typeId: "audio-live", values: { turnTaking: "vad" } },
+        { role: "input", typeId: "image", values: { imageSource: "file" } },
+        { role: "output", typeId: "image", values: { size: "1024x1024" } },
+      ],
+    });
+    expect(text).toContain("wait for the participant");
+    expect(text).toContain("workshop_generate_image");
+    expect(text).toContain("not at session start");
+  });
+
   it("uses input_image for https image URLs", () => {
     const events = buildRealtimeBootstrapClientEvents({
       blocks: [

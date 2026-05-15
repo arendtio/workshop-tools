@@ -84,6 +84,8 @@ export function buildFullRealtimeInstructions(plan) {
   }
 
   parts.push(describeConfiguredOutputs(plan));
+  const liveImage = liveAudioImageOutputGuidance(plan);
+  if (liveImage) parts.push(liveImage);
 
   const merged = parts.join("\n\n").trim();
   return merged || "You are a helpful workshop assistant.";
@@ -102,7 +104,7 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "audio")
       return `- Output: TTS / speech file (voice preference: ${String(b.values?.voice ?? "").trim() || "server default"}).`;
     if (b.typeId === "image")
-      return `- Output: image (size hint: ${String(b.values?.size ?? "").trim() || "server default"}; image generation is not executed inside this Realtime session).`;
+      return `- Output: image (size hint: ${String(b.values?.size ?? "").trim() || "server default"}). Call \`workshop_generate_image\` only after the participant gives explicit instructions to generate or edit an image (voice or text)—not at session start.`;
     if (b.typeId === "form")
       return "- Output: structured form (describe fields the host should collect or present).";
     if (b.typeId === "dynamic-ui")
@@ -110,6 +112,20 @@ function describeConfiguredOutputs(plan) {
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
+}
+
+/**
+ * @param {{ blocks: { role: string, typeId: string }[] }} plan
+ */
+function liveAudioImageOutputGuidance(plan) {
+  const hasLiveIn = plan.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
+  const hasImageOut = plan.blocks.some((b) => b.role === "output" && b.typeId === "image");
+  if (!hasLiveIn || !hasImageOut) return "";
+  return (
+    "Live microphone input is active: wait for the participant to speak (or for new text input) before calling " +
+    "`workshop_generate_image`. Do not generate or edit the output image immediately after session start; " +
+    "bootstrap context and reference images are not sufficient instructions."
+  );
 }
 
 /**
@@ -170,7 +186,6 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     if (b.typeId === "image") {
       const src = String(b.values?.imageSource ?? "file");
       const url = String(b.values?.imageUrl ?? "").trim();
-      const stub = String(b.values?.uploadStub ?? "").trim();
       if (src === "url" && isHttpsUrl(url)) {
         events.push({
           type: "conversation.item.create",
@@ -183,16 +198,21 @@ export function buildRealtimeBootstrapClientEvents(plan) {
             ],
           },
         });
-      } else {
-        events.push(
-          conversationUserText(
-            `${label}\nImage source: ${src}. ` +
-              (stub ? `Local filename stub: "${stub}".` : "") +
-              (url && !isHttpsUrl(url) ? ` Non-HTTPS URL omitted: "${url.slice(0, 80)}".` : "") +
-              " No image bytes are available in this session until uploaded server-side.",
-          ),
-        );
+        continue;
       }
+      if (src === "file") {
+        // Bytes are attached after WebRTC connect by the browser (`input_image` + data URL).
+        continue;
+      }
+      const stub = String(b.values?.uploadStub ?? "").trim();
+      events.push(
+        conversationUserText(
+          `${label}\nImage source: ${src}. ` +
+            (stub ? `Local filename stub: "${stub}".` : "") +
+            (url && !isHttpsUrl(url) ? ` Non-HTTPS URL omitted: "${url.slice(0, 80)}".` : "") +
+            " Provide an https:// image URL or use file mode and select an image before Run.",
+        ),
+      );
       continue;
     }
 
