@@ -196,4 +196,38 @@ describe("HTTP API", () => {
     const content = postedBody.input?.[0]?.content;
     expect(content.some((c) => c.type === "input_image" && c.image_url.startsWith("data:image/png"))).toBe(true);
   });
+
+  it("POST /api/audio/speech returns data_url when OpenAI succeeds", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        if (String(url).includes("/audio/speech")) {
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () => new Uint8Array([0, 1, 2, 3]).buffer,
+          };
+        }
+        return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) };
+      }),
+    );
+
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/audio/speech")
+      .send({
+        plan: {
+          version: 1,
+          blocks: [
+            { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
+            { id: "2", role: "output", typeId: "audio", values: { voice: "alloy" } },
+          ],
+        },
+        input: "hello world",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(String(res.body.data_url)).toMatch(/^data:audio\/mpeg;base64,/);
+  });
 });

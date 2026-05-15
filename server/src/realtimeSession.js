@@ -1,5 +1,5 @@
 import { buildFullRealtimeInstructions } from "./orchestrateRealtime.js";
-import { buildWorkshopImageGenerationTool, planHasImageOutput } from "./imageGeneration.js";
+import { buildWorkshopRealtimeTools } from "./workshopRealtimeTools.js";
 
 /** GA Realtime model for WebRTC (`POST /v1/realtime/calls`); override via `OPENAI_REALTIME_MODEL`. */
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-mini";
@@ -67,8 +67,9 @@ export function buildRealtimePostConnectSession(plan, options = {}) {
   } else {
     session.audio.input.turn_detection = turn_detection;
   }
-  if (planHasImageOutput(plan)) {
-    session.tools = [buildWorkshopImageGenerationTool(plan)];
+  const tools = buildWorkshopRealtimeTools(plan);
+  if (tools.length) {
+    session.tools = tools;
     session.tool_choice = "auto";
   }
   return session;

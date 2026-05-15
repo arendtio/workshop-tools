@@ -1457,6 +1457,29 @@ footer.status-bar {
   text-align: center;
 }
 
+.output-audio-stage {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.output-audio-player {
+  width: 100%;
+  max-width: 420px;
+}
+
+.output-audio-placeholder,
+.output-audio-generating {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0.25rem 0 0;
+}
+
+.output-audio-caption {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  margin-top: 0.35rem;
+}
+
 @media (max-width: 520px) {
   .output-text-msg {
     max-width: 96%;

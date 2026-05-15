@@ -323,6 +323,7 @@ const FORM_SCHEMA = {
       "Upload files → Vector store + `file_search` (`vector_store_ids`) in the Responses API. End users only pick files; indexing stays server-side.",
     defaults: {
       knowledgeFiles: "",
+      knowledgeInlineExcerpt: "",
     },
     fields: [
       {
@@ -336,7 +337,7 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Your backend ingests these into a vector store / file search; participants do not manage collection IDs.",
+        hint: "Plain-text uploads (.txt, .md, …) embed an excerpt into session instructions; binary files still send filenames only.",
       },
     ],
   },
@@ -404,7 +405,7 @@ const FORM_SCHEMA = {
   },
   "input:form": {
     apiMapping:
-      "Structured collector — serialized to JSON / tool payloads on the backend. Composer is sandbox-only.",
+      "Structured collector — bootstrap + JSON on submit during a Realtime run (`conversation.item.create`). Composer builds the blueprint.",
     defaults: {},
     fields: [],
   },
@@ -418,13 +419,13 @@ const FORM_SCHEMA = {
   },
   "output:form": {
     apiMapping:
-      "Structured presenter — e.g. model-populated defaults. Composer matches the Input form module.",
+      "Realtime tool `workshop_emit_form_values` fills readonly preview from model output; composer matches the Input form module.",
     defaults: {},
     fields: [],
   },
   "output:dynamic-ui": {
     apiMapping:
-      "NL-driven UI on the output path — regenerate by editing prompt and submitting again.",
+      "Realtime tool `workshop_emit_dynamic_ui` refreshes the preview; manual prompt + mock regen still work offline.",
     defaults: {
       uiPrompt: "Ein Balkendiagramm mit vier Balken für Q1–Q4 (Demo-Zahlen).",
     },
@@ -458,7 +459,7 @@ const FORM_SCHEMA = {
   },
   "output:audio": {
     apiMapping:
-      "POST `/v1/audio/speech` — workshop picks voice only; model, speed, format, and copy come from processing / backend.",
+      "POST `/v1/audio/speech` via Realtime tool `workshop_synthesize_speech` — voice from this block; text from the model at call time.",
     defaults: {
       voice: "alloy",
     },
@@ -489,7 +490,7 @@ const FORM_SCHEMA = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _runAudioDataUrl?: string, _runAudioGenerating?: boolean, _formRunAnswers?: Record<string, string>, _runDynamicUiPrompt?: string, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
@@ -575,6 +576,9 @@ function pipelineHasLiveAudioInput() {
 }
 
 const REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS = 12_000_000;
+
+/** Max characters read from a text file into `process:vector-db` values (plan + instructions). */
+const VECTOR_KNOWLEDGE_INLINE_MAX_CHARS = 120_000;
 
 /** Guard for `input_image` data URLs on the Realtime data channel (character count incl. prefix). */
 const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
@@ -1062,7 +1066,16 @@ async function startRealtimeRun() {
         delete b._runImageDataUrl;
         delete b._runImageGenerating;
       }
-    }
+      if (b.role === "output" && b.typeId === "audio") {
+        delete b._runAudioDataUrl;
+        delete b._runAudioGenerating;
+      }
+      if (b.role === "output" && b.typeId === "form") {
+        delete b._formRunAnswers;
+      }
+      if (b.role === "output" && b.typeId === "dynamic-ui") {
+        delete b._runDynamicUiPrompt;
+      }
     seedTextOutputTranscriptLogsFromPipeline();
 
     const pc = new RTCPeerConnection({ iceServers: REALTIME_WEBRTC_ICE_SERVERS });
@@ -1634,6 +1647,34 @@ function renderHintField(field, wrap) {
   wrap.appendChild(p);
 }
 
+/**
+ * @param {{ values: Record<string, string> }} block
+ * @param {File} file
+ */
+async function ingestVectorKnowledgeFile(block, file) {
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  const textish = ["txt", "md", "markdown", "csv", "json", "html", "htm"].includes(ext);
+  block.values.knowledgeFiles = file.name;
+  if (!textish) {
+    block.values.knowledgeInlineExcerpt = "";
+    showToast(
+      "Embedding: only plain-text types (.txt, .md, .csv, …) are inlined; the filename still appears in instructions.",
+    );
+    renderAll();
+    return;
+  }
+  try {
+    const t = await file.text();
+    block.values.knowledgeInlineExcerpt =
+      t.length > VECTOR_KNOWLEDGE_INLINE_MAX_CHARS ? t.slice(0, VECTOR_KNOWLEDGE_INLINE_MAX_CHARS) : t;
+    showToast(`Knowledge: embedded ${block.values.knowledgeInlineExcerpt.length} characters from ${file.name}.`);
+  } catch {
+    block.values.knowledgeInlineExcerpt = "";
+    showToast("Could not read file for excerpt.");
+  }
+  renderAll();
+}
+
 function renderDropzoneField(field, block, disabled, wrap) {
   const values = block.values;
   const zone = document.createElement("div");
@@ -1647,8 +1688,16 @@ function renderDropzoneField(field, block, disabled, wrap) {
 
   const sub = document.createElement("div");
   sub.className = "dropzone-sub";
+  const excerpt =
+    block.role === "process" && block.typeId === "vector-db"
+      ? String(values.knowledgeInlineExcerpt || "").trim()
+      : "";
   const name = values[field.key] || "";
-  sub.textContent = name ? `Selected: ${name}` : "No file selected";
+  sub.textContent = name
+    ? excerpt
+      ? `Selected: ${name} · ${excerpt.length} chars embedded`
+      : `Selected: ${name}`
+    : "No file selected";
   zone.appendChild(sub);
 
   const inp = document.createElement("input");
@@ -1660,6 +1709,12 @@ function renderDropzoneField(field, block, disabled, wrap) {
     const f = inp.files && inp.files[0];
     values[field.key] = f ? f.name : "";
     sub.textContent = f ? `Selected: ${f.name}` : "No file selected";
+    if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
+      if (f) void ingestVectorKnowledgeFile(block, f);
+      else {
+        values.knowledgeInlineExcerpt = "";
+      }
+    }
     if (block.typeId === "audio-rec") {
       block._recordedAudioBlob = f || null;
     }
@@ -1694,6 +1749,9 @@ function renderDropzoneField(field, block, disabled, wrap) {
     if (f) {
       values[field.key] = f.name;
       sub.textContent = `Selected: ${f.name}`;
+      if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
+        void ingestVectorKnowledgeFile(block, f);
+      }
       if (block.typeId === "audio-rec") {
         block._recordedAudioBlob = f;
       }
@@ -2247,7 +2305,10 @@ function appendSystemTranscriptToTextOutputs(label, body, dedupeKey) {
   const text = String(body || "").trim();
   if (!text) return;
   const textTargets = state.blocks.filter((b) => b.role === "output" && b.typeId === "text");
-  if (!textTargets.length) return;
+  if (!textTargets.length) {
+    showToast(`${label}: ${text.slice(0, 140)}${text.length > 140 ? "…" : ""}`);
+    return;
+  }
   const entry = { key: dedupeKey, role: /** @type {const} */ ("system"), label, body: text };
   for (const b of textTargets) {
     const log = ensureTranscriptLog(b);
@@ -2599,6 +2660,40 @@ function appendImageOutputPlaceholder(block, card) {
   card.appendChild(stage);
 }
 
+function appendSpeechOutputPlaceholder(block, card) {
+  const wrap = document.createElement("div");
+  wrap.className = "output-audio-stage";
+
+  const dataUrl = block._runAudioDataUrl && String(block._runAudioDataUrl).trim();
+  const generating = !!block._runAudioGenerating;
+
+  if (generating) {
+    const p = document.createElement("p");
+    p.className = "output-audio-generating";
+    p.textContent = "Synthesizing speech…";
+    wrap.appendChild(p);
+  }
+
+  if (dataUrl) {
+    const audio = document.createElement("audio");
+    audio.className = "output-audio-player";
+    audio.controls = true;
+    audio.src = dataUrl;
+    wrap.appendChild(audio);
+    const cap = document.createElement("div");
+    cap.className = "output-audio-caption";
+    cap.textContent = "Generated in this session (workshop_synthesize_speech)";
+    wrap.appendChild(cap);
+  } else if (!generating) {
+    const ph = document.createElement("p");
+    ph.className = "output-audio-placeholder";
+    ph.textContent = `Voice: ${String(block.values.voice || "alloy")} — ask the model for TTS (Realtime tool).`;
+    wrap.appendChild(ph);
+  }
+
+  card.appendChild(wrap);
+}
+
 const FORM_BUILDER_FIELD_TYPES = [
   { value: "text", label: "Einzeiliges Textfeld" },
   { value: "textarea", label: "Mehrzeiliges Textfeld" },
@@ -2788,14 +2883,67 @@ function renderDynamicUiPreview(host, committedPrompt, interactive, role) {
   host.appendChild(body);
 }
 
-function appendFormLiveControl(host, item, index, locked, readonlyMock) {
+function pickRunAnswerForForm(runAnswers, label) {
+  if (!runAnswers || typeof runAnswers !== "object" || !label) return null;
+  if (Object.prototype.hasOwnProperty.call(runAnswers, label)) return runAnswers[label];
+  const lk = String(label).toLowerCase();
+  for (const k of Object.keys(runAnswers)) {
+    if (k.toLowerCase() === lk) return runAnswers[k];
+  }
+  return null;
+}
+
+/**
+ * @param {HTMLElement} formEl
+ * @param {{ formItems?: object[] }} block
+ */
+function collectLiveFormAnswersFromDom(formEl, block) {
+  const items = Array.isArray(block.formItems) ? block.formItems : [];
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const typ = it.typ;
+    if (typ === "button" || typ === "submit" || typ === "reset") continue;
+    const row = formEl.querySelector(`[data-wfidx="${i}"]`);
+    const label = String(it.label || `field_${i}`).trim() || `field_${i}`;
+    if (!row) continue;
+    if (typ === "textarea") {
+      const ta = row.querySelector("textarea");
+      if (ta) out[label] = ta.value;
+      continue;
+    }
+    if (typ === "radio") {
+      const sel = row.querySelector('input[type="radio"]:checked');
+      out[label] = sel ? sel.value : "";
+      continue;
+    }
+    if (typ === "select") {
+      const sel = row.querySelector("select");
+      out[label] = sel ? sel.value : "";
+      continue;
+    }
+    if (typ === "checkbox") {
+      const cb = row.querySelector('input[type="checkbox"]');
+      out[label] = cb && cb.checked ? "true" : "false";
+      continue;
+    }
+    const inp = row.querySelector("input");
+    out[label] = inp ? inp.value : "";
+  }
+  return out;
+}
+
+function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswers) {
   const rowWrap = document.createElement("div");
   rowWrap.className = "composer-form-field";
 
   const typ = item.typ;
   const fid = `${item.id || "fld"}-${index}`;
+  const ra = pickRunAnswerForForm(runAnswers, item.label);
 
   if (typ === "button" || typ === "submit" || typ === "reset") {
+    rowWrap.dataset.wfidx = String(index);
     const b = document.createElement("button");
     b.type = typ === "submit" ? "submit" : typ === "reset" ? "reset" : "button";
     b.className =
@@ -2813,17 +2961,19 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
   lab.textContent = item.label;
 
   if (typ === "textarea") {
+    rowWrap.dataset.wfidx = String(index);
     const ta = document.createElement("textarea");
     ta.id = fid;
     ta.className = "composer-form-el";
     ta.rows = 3;
     ta.disabled = locked;
     if (readonlyMock) {
-      ta.value = String(mockFilledControlState(item, index));
+      ta.value =
+        ra != null && String(ra).length ? String(ra) : String(mockFilledControlState(item, index));
       ta.readOnly = true;
     } else {
       ta.placeholder = "(Eingabe)";
-      ta.value = "";
+      ta.value = ra != null ? String(ra) : "";
     }
     rowWrap.appendChild(lab);
     rowWrap.appendChild(ta);
@@ -2835,10 +2985,13 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
     const opts = parseFormOptions(item.options);
     const lg = document.createElement("fieldset");
     lg.className = "composer-form-fs";
+    lg.dataset.wfidx = String(index);
     const cap = document.createElement("legend");
     cap.textContent = item.label;
     lg.appendChild(cap);
     const mockPick = opts.length ? opts[Math.min(Math.max(index, 0), opts.length - 1)] : "";
+    let pick = mockPick;
+    if (readonlyMock && ra != null && String(ra).length && opts.includes(String(ra))) pick = String(ra);
     opts.forEach((opt) => {
       const rw = document.createElement("label");
       rw.className = "composer-form-radio-line";
@@ -2847,7 +3000,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
       rd.name = `rg-${item.id}-${index}`;
       rd.value = opt;
       rd.disabled = locked || readonlyMock;
-      if (readonlyMock) rd.checked = opt === mockPick;
+      if (readonlyMock) rd.checked = opt === pick;
       rw.appendChild(rd);
       rw.appendChild(document.createTextNode(" " + opt));
       lg.appendChild(rw);
@@ -2860,6 +3013,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
   if (typ === "select") {
     const opts = parseFormOptions(item.options);
     rowWrap.className += " composer-form-field-stack";
+    rowWrap.dataset.wfidx = String(index);
     const sel = document.createElement("select");
     sel.id = fid;
     sel.className = "composer-form-el";
@@ -2871,7 +3025,11 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
       sel.appendChild(op);
     });
     if (opts.length) {
-      sel.selectedIndex = readonlyMock ? Math.min(1, opts.length - 1) : 0;
+      if (readonlyMock && ra != null && String(ra).length && opts.includes(String(ra))) {
+        sel.value = String(ra);
+      } else {
+        sel.selectedIndex = readonlyMock ? Math.min(1, opts.length - 1) : 0;
+      }
     }
     rowWrap.appendChild(lab);
     rowWrap.appendChild(sel);
@@ -2882,17 +3040,23 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
   if (typ === "checkbox") {
     const row = document.createElement("label");
     row.className = "composer-form-check-line";
+    row.dataset.wfidx = String(index);
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.id = fid;
     cb.disabled = locked || readonlyMock;
-    if (readonlyMock) cb.checked = !!mockFilledControlState(item, index);
+    if (readonlyMock) {
+      if (ra === "true" || ra === "1") cb.checked = true;
+      else if (ra === "false" || ra === "0") cb.checked = false;
+      else cb.checked = !!mockFilledControlState(item, index);
+    }
     row.appendChild(cb);
     row.appendChild(document.createTextNode(" " + item.label));
     host.appendChild(row);
     return;
   }
 
+  rowWrap.dataset.wfidx = String(index);
   const inp = document.createElement("input");
   inp.className = "composer-form-el";
   inp.id = fid;
@@ -2902,10 +3066,12 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock) {
   else inp.type = "text";
 
   if (readonlyMock) {
-    inp.value = String(mockFilledControlState(item, index));
+    inp.value =
+      ra != null && String(ra).length ? String(ra) : String(mockFilledControlState(item, index));
     inp.readOnly = true;
   } else {
     inp.placeholder = "…";
+    inp.value = ra != null ? String(ra) : "";
   }
 
   rowWrap.appendChild(lab);
@@ -3063,11 +3229,32 @@ function renderFormComposerModule(block, card) {
     formEl.noValidate = true;
     formEl.addEventListener("submit", (e) => {
       e.preventDefault();
-      showToast("Absenden nur Demo — kein Backend-Aufruf.");
+      if (isOutput) {
+        showToast("Ausgabe-Form ist nur Lese-Vorschau.");
+        return;
+      }
+      if (
+        state.running &&
+        state.runMode === "realtime" &&
+        realtimeDataChannel &&
+        realtimeDataChannel.readyState === "open"
+      ) {
+        const answers = collectLiveFormAnswersFromDom(formEl, block);
+        const json = JSON.stringify(answers, null, 2);
+        const def = findDef(block.role, block.typeId);
+        const title = def ? def.title : "form";
+        sendRealtimeUserTextItem(
+          realtimeDataChannel,
+          `Input · form (${title})\n\nSubmitted field values (JSON):\n${json}`,
+        );
+        showToast("Formular an Realtime gesendet.");
+        return;
+      }
+      showToast("Absenden: zuerst „Run“ starten, dann sendet das Formular an Realtime.");
     });
 
     block.formItems.forEach((it, i) =>
-      appendFormLiveControl(formEl, it, i, locked, isOutput)
+      appendFormLiveControl(formEl, it, i, locked, isOutput, isOutput ? block._formRunAnswers : undefined),
     );
     prevHost.appendChild(formEl);
   }
@@ -3082,7 +3269,7 @@ function renderFormComposerModule(block, card) {
   const footHint = document.createElement("p");
   footHint.className = "field-hint";
   footHint.textContent =
-    "Im echten Produkt wird die Liste als JSON/schema serialisiert; hier nur Gestaltungs- und Storytelling‑Helfer.";
+    "Input: während eines Laufs sendet „Absenden“ JSON an Realtime. Ausgabe: Modellbefüllung per Tool `workshop_emit_form_values`.";
   body.appendChild(footHint);
 
   card.appendChild(body);
@@ -3137,10 +3324,17 @@ function renderDynamicUiModule(block, card) {
 
   const prevTitle = document.createElement("div");
   prevTitle.className = "composer-form-subtitle";
-  prevTitle.textContent = "Gerenderte Oberfläche (Mock)";
+  prevTitle.textContent =
+    block.role === "output" && block._runDynamicUiPrompt
+      ? "Gerenderte Oberfläche (Mock) — zuletzt per Modell-Tool"
+      : "Gerenderte Oberfläche (Mock)";
 
   const host = document.createElement("div");
-  renderDynamicUiPreview(host, block.dynamicUiCommitted, interactive, block.role);
+  const previewCommitted =
+    block.role === "output"
+      ? String(block._runDynamicUiPrompt || block.dynamicUiCommitted || "").trim()
+      : String(block.dynamicUiCommitted || "").trim();
+  renderDynamicUiPreview(host, previewCommitted, interactive, block.role);
 
   body.appendChild(lbl);
   body.appendChild(ta);
@@ -3459,6 +3653,9 @@ function renderModuleCard(block, container) {
   if (block.role === "output" && block.typeId === "image") {
     appendImageOutputPlaceholder(block, card);
   }
+  if (block.role === "output" && block.typeId === "audio") {
+    appendSpeechOutputPlaceholder(block, card);
+  }
   container.appendChild(card);
 }
 
@@ -3705,6 +3902,143 @@ async function handleRealtimeResponseDone(msg) {
             } finally {
               stopImageGenerationProgressUi();
             }
+            renderAll();
+          }
+        } else if (name === "workshop_synthesize_speech") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const inputText = String(args.input ?? "").trim();
+          if (!inputText) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_synthesize_speech",
+              "Call skipped — no `input` in tool arguments.",
+              `tool:${callId}:skip`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "missing_input" });
+          } else {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_synthesize_speech",
+              `Calling TTS…\n\n${inputText.slice(0, 800)}${inputText.length > 800 ? "…" : ""}`,
+              `tool:${callId}:start`,
+            );
+            for (const b of state.blocks) {
+              if (b.role === "output" && b.typeId === "audio") b._runAudioGenerating = true;
+            }
+            renderAll();
+            try {
+              const res = await fetch("/api/audio/speech", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  plan: serializePipelinePlan(),
+                  input: inputText,
+                }),
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || !data.ok) {
+                const detail = data.message || data.error || res.statusText || "request failed";
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_synthesize_speech",
+                  `Failed: ${String(detail)}`,
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({ ok: false, error: "speech_request_failed", message: String(detail) });
+                showToast(`Speech tool: ${String(detail).slice(0, 160)}`);
+              } else if (data.data_url) {
+                state.blocks
+                  .filter((b) => b.role === "output" && b.typeId === "audio")
+                  .forEach((b) => {
+                    b._runAudioDataUrl = data.data_url;
+                  });
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_synthesize_speech",
+                  "Completed — audio shown in output:audio.",
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({ ok: true, message: "Audio is shown in the workshop output." });
+              } else {
+                appendSystemTranscriptToTextOutputs(
+                  "Tool · workshop_synthesize_speech",
+                  "Failed: server returned no audio data.",
+                  `tool:${callId}:done`,
+                );
+                outStr = JSON.stringify({ ok: false, error: "no_data_url" });
+              }
+            } finally {
+              for (const b of state.blocks) {
+                if (b.role === "output" && b.typeId === "audio") delete b._runAudioGenerating;
+              }
+            }
+            renderAll();
+          }
+        } else if (name === "workshop_emit_form_values") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const fields = Array.isArray(args.fields) ? args.fields : [];
+          /** @type {Record<string, string>} */
+          const answers = {};
+          for (const row of fields) {
+            if (!row || typeof row !== "object") continue;
+            const lbl = String(/** @type {{ label?: string }} */ (row).label ?? "").trim();
+            const val = String(/** @type {{ value?: string }} */ (row).value ?? "");
+            if (lbl) answers[lbl] = val;
+          }
+          if (!Object.keys(answers).length) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_emit_form_values",
+              "Call skipped — no fields in tool arguments.",
+              `tool:${callId}:skip`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "missing_fields" });
+          } else {
+            state.blocks
+              .filter((b) => b.role === "output" && b.typeId === "form")
+              .forEach((b) => {
+                b._formRunAnswers = { ...(b._formRunAnswers || {}), ...answers };
+              });
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_emit_form_values",
+              `Applied ${Object.keys(answers).length} field value(s) to output form preview(s).`,
+              `tool:${callId}:done`,
+            );
+            outStr = JSON.stringify({ ok: true, message: "Form output widgets updated." });
+            renderAll();
+          }
+        } else if (name === "workshop_emit_dynamic_ui") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const uiPrompt = String(args.ui_prompt ?? "").trim();
+          if (!uiPrompt) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_emit_dynamic_ui",
+              "Call skipped — no ui_prompt.",
+              `tool:${callId}:skip`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "missing_ui_prompt" });
+          } else {
+            state.blocks
+              .filter((b) => b.role === "output" && b.typeId === "dynamic-ui")
+              .forEach((b) => {
+                b._runDynamicUiPrompt = uiPrompt;
+              });
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_emit_dynamic_ui",
+              `Updated dynamic UI preview.\n\n${uiPrompt.slice(0, 800)}${uiPrompt.length > 800 ? "…" : ""}`,
+              `tool:${callId}:done`,
+            );
+            outStr = JSON.stringify({ ok: true, message: "Dynamic UI output updated." });
             renderAll();
           }
         } else {

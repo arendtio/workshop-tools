@@ -9,7 +9,7 @@ describe("orchestrateRealtime", () => {
         {
           role: "process",
           typeId: "vector-db",
-          values: { knowledgeFiles: "notes.pdf" },
+          values: { knowledgeFiles: "notes.pdf", knowledgeInlineExcerpt: "alpha\nbeta" },
         },
         {
           role: "process",
@@ -20,6 +20,7 @@ describe("orchestrateRealtime", () => {
       ],
     });
     expect(text).toContain("notes.pdf");
+    expect(text).toContain("alpha");
     expect(text).toContain("Auftragsdaten");
   });
 
