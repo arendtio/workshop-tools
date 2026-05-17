@@ -17,7 +17,7 @@ const INPUT_TYPES = [
     id: "dynamic-ui",
     code: "UI",
     title: "UI (prompt)",
-    desc: "Describe UI to render — sliders, matrix, charts, …",
+    desc: "HTML or JSON (`html` field) — wire `data-ws-handler` / `data-wdui-path` for runs",
     live: false,
   },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
@@ -51,7 +51,7 @@ const OUTPUT_TYPES = [
     id: "dynamic-ui",
     code: "UI",
     title: "UI (prompt)",
-    desc: "Describe UI — edit prompt & resubmit for a fresh mock preview",
+    desc: "HTML output + optional `ui_data` JSON — `data-ws-bind*` in markup",
     live: false,
   },
   { id: "audio", code: "AUD", title: "Audio", desc: "Speech or sound file", live: false },
@@ -411,9 +411,10 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "NL stub **or** JSON spec (`kind: workshop-dynamic-ui`, `version: 2`): declarative fields, buttons with allowlisted `handlers`, values PATCH the run session. On push / run, field JSON is sent to the model; button clicks emit structured handler events on the Realtime channel.",
+      "Freies HTML (oder JSON `kind: workshop-dynamic-ui` mit `html`-String). `data-ws-handler` auf Controls → Klick sendet Realtime-Events; `data-wdui-path` oder `name` auf Feldern → Werte landen im Session-Snapshot / Push-JSON.",
     defaults: {
-      uiPrompt: "Drei Slider für Budget, Risiko und Zufriedenheit (je 0–100).",
+      uiPrompt:
+        '{"kind":"workshop-dynamic-ui","html":"<p>Demo</p><label>Note <input data-wdui-path=\\"note\\" /></label><button type=\\"button\\" data-ws-handler=\\"save\\">OK</button>","handlers":["save"]}',
     },
     fields: [],
   },
@@ -425,9 +426,10 @@ const FORM_SCHEMA = {
   },
   "output:dynamic-ui": {
     apiMapping:
-      "Realtime `workshop_emit_dynamic_ui` accepts `ui_spec` (v2 layout + `dataSchema`), `ui_data` (JSON validated against that schema), and/or legacy `ui_prompt` (NL stub). Renders declarative views (labels, bars, fields) bound to model JSON when a schema is present; session read/apply includes widgets + `outputData`.",
+      "Realtime `workshop_emit_dynamic_ui`: `ui_spec` / committed HTML, `ui_data` beliebiges JSON — Bindings z. B. `data-ws-bind=\"title\"`, `data-ws-bind-src` für Bilder. Session: widgets + `outputData`.",
     defaults: {
-      uiPrompt: "Ein Balkendiagramm mit vier Balken für Q1–Q4 (Demo-Zahlen).",
+      uiPrompt:
+        '{"kind":"workshop-dynamic-ui","html":"<h3 data-ws-bind=\\"title\\"></h3><p data-ws-bind=\\"body\\"></p>"}',
     },
     fields: [],
   },
@@ -891,7 +893,7 @@ async function pushSingleInputModuleToRealtime(dc, block) {
     const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
     if (W) {
       const p = W.parseCommitted(staged);
-      if (p.mode === "spec") {
+      if (p.mode === "html") {
         const fields = W.collectFieldValuesFromDom(block.id);
         extraFields = `\n\nStructured field values (JSON):\n${JSON.stringify(fields, null, 2)}`;
       }
@@ -1191,7 +1193,7 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
 }
 
 /**
- * After server bootstrap items, send one structured JSON snapshot per input dynamic-ui v2 spec.
+ * After server bootstrap items, send one structured JSON snapshot per input dynamic-ui HTML/JSON spec.
  * @param {RTCDataChannel} dc
  */
 function sendDynamicUiSpecInitialFieldSnapshots(dc) {
@@ -1201,7 +1203,7 @@ function sendDynamicUiSpecInitialFieldSnapshots(dc) {
     if (b.role !== "input" || b.typeId !== "dynamic-ui") continue;
     const staged = String(b.dynamicUiCommitted || "").trim();
     const p = W.parseCommitted(staged);
-    if (p.mode !== "spec") continue;
+    if (p.mode !== "html") continue;
     const fields = W.collectFieldValuesFromDom(b.id);
     const def = findDef(b.role, b.typeId);
     const partTitle = def ? def.title : b.typeId;
@@ -2461,9 +2463,9 @@ function gatherConversationSnapshotForTextOutput() {
         const draft = String(b.values.uiPrompt || "").trim();
         const staged = String(b.dynamicUiCommitted || "").trim();
         const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
-        const parsed = W ? W.parseCommitted(staged) : { mode: "nl", text: staged };
-        if (parsed.mode === "spec") {
-          body = `Dynamic UI v2 (committed JSON, ${staged.length} chars). Draft NL: ${draft || "(empty)"}`;
+        const parsed = W ? W.parseCommitted(staged) : { mode: "empty" };
+        if (parsed.mode === "html") {
+          body = `Dynamic UI (HTML / JSON), ${staged.length} Zeichen committed. Draft: ${draft || "(empty)"}`;
         } else {
           body =
             draft || staged
@@ -3017,6 +3019,21 @@ function parseFormOptions(optionsStr) {
 
 /**
  * @param {HTMLElement} host
+ * @param {string} [message]
+ */
+function renderDynamicUiEmpty(host, message) {
+  host.innerHTML = "";
+  host.className = "dynamic-ui-stage";
+  const empty = document.createElement("div");
+  empty.className = "dynamic-ui-placeholder";
+  empty.textContent =
+    message ||
+    "Rohes HTML oder JSON mit kind „workshop-dynamic-ui“ und Feld „html“ einfügen, dann „Erzeugen / neu erzeugen“.";
+  host.appendChild(empty);
+}
+
+/**
+ * @param {HTMLElement} host
  * @param {{ id: string, role: string, typeId: string, dynamicUiCommitted?: string, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown> }} block
  * @param {boolean} interactive
  * @param {boolean} syncWidgetsToServer
@@ -3024,26 +3041,51 @@ function parseFormOptions(optionsStr) {
 function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
   const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
   const committed = String(block.dynamicUiCommitted ?? "").trim();
-  const parsedBase = W ? W.parseCommitted(committed) : { mode: "nl", text: committed };
+  const parsedBase = W ? W.parseCommitted(committed) : { mode: "empty" };
 
-  if (block.role === "output") {
+  /**
+   * @returns {{ html: string, handlers: string[] } | null}
+   */
+  function htmlSpecForOutput() {
     const overlay =
       block._runDynamicUiSpecOverlay && typeof block._runDynamicUiSpecOverlay === "object"
         ? block._runDynamicUiSpecOverlay
         : null;
-    const spec = overlay || (parsedBase.mode === "spec" ? parsedBase.spec : null);
-    if (spec && W) {
-      W.renderInto(host, spec, "output", { interactive: false, data: block._runDynamicUiData || {} });
+    if (overlay && typeof overlay.html === "string" && overlay.html.trim()) {
+      const h = Array.isArray(overlay.handlers) ? overlay.handlers.map((x) => String(x)) : [];
+      return { html: overlay.html.trim(), handlers: h };
+    }
+    if (parsedBase.mode === "html" && parsedBase.html) {
+      return { html: parsedBase.html, handlers: parsedBase.handlers || [] };
+    }
+    const runPrompt = String(block._runDynamicUiPrompt || "").trim();
+    if (runPrompt && (/<[a-z][\s\S]*>/i.test(runPrompt) || /<\//i.test(runPrompt))) {
+      return { html: runPrompt, handlers: [] };
+    }
+    return null;
+  }
+
+  if (block.role === "output") {
+    if (!W) {
+      renderDynamicUiEmpty(host);
       return;
     }
-    const nl = String(block._runDynamicUiPrompt || committed).trim();
-    renderDynamicUiNlMock(host, nl, false, "output", false);
+    const hs = htmlSpecForOutput();
+    if (hs) {
+      W.renderInto(host, hs, "output", { interactive: false, data: block._runDynamicUiData || {} });
+      return;
+    }
+    renderDynamicUiEmpty(host);
     return;
   }
 
-  if (parsedBase.mode === "spec" && W) {
+  if (!W) {
+    renderDynamicUiEmpty(host);
+    return;
+  }
+  if (parsedBase.mode === "html" && parsedBase.html) {
     const canSync = !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId);
-    W.renderInto(host, parsedBase.spec, "input", {
+    W.renderInto(host, { html: parsedBase.html, handlers: parsedBase.handlers || [] }, "input", {
       interactive,
       schedulePatch: canSync ? (key, val) => scheduleWorkshopDynamicUiWidgetPatch(key, val) : undefined,
       onHandler: (handlerName, detail) => {
@@ -3065,190 +3107,7 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
     return;
   }
 
-  const nl = committed;
-  renderDynamicUiNlMock(
-    host,
-    nl,
-    interactive,
-    "input",
-    !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId),
-  );
-}
-
-/**
- * JSON Schema used to validate `ui_data` for an output dynamic-ui block (overlay wins over committed spec).
- * @param {{ dynamicUiCommitted?: string, _runDynamicUiSpecOverlay?: Record<string, unknown> }} block
- * @returns {Record<string, unknown> | null}
- */
-function getDynamicUiOutputDataSchema(block) {
-  const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
-  if (!W) return null;
-  const overlay =
-    block._runDynamicUiSpecOverlay && typeof block._runDynamicUiSpecOverlay === "object"
-      ? block._runDynamicUiSpecOverlay
-      : null;
-  if (overlay && overlay.dataSchema && typeof overlay.dataSchema === "object") {
-    return /** @type {Record<string, unknown>} */ (overlay.dataSchema);
-  }
-  const p = W.parseCommitted(String(block.dynamicUiCommitted || ""));
-  if (p.mode === "spec" && p.spec.dataSchema && typeof p.spec.dataSchema === "object") {
-    return /** @type {Record<string, unknown>} */ (p.spec.dataSchema);
-  }
-  return null;
-}
-
-/**
- * Stub UI from keywords in `committedPrompt`.
- * @param {boolean} [syncWidgetsToServer] when true, interactive input widgets PATCH `/api/workshop-session/dynamic-ui`.
- */
-function renderDynamicUiNlMock(host, committedPrompt, interactive, role, syncWidgetsToServer) {
-  host.innerHTML = "";
-  host.className = "dynamic-ui-stage";
-
-  const p = (committedPrompt || "").trim();
-  if (!p) {
-    const empty = document.createElement("div");
-    empty.className = "dynamic-ui-placeholder";
-    empty.textContent = "Noch keine Vorschau — Prompt eingeben und „Erzeugen / neu erzeugen“ wählen.";
-    host.appendChild(empty);
-    return;
-  }
-
-  const low = p.toLowerCase();
-  let mode = "generic";
-  if (/balken|bar chart|balkendiagramm|column chart/i.test(low)) mode = "bars";
-  else if (/slider|schieberegler|\bregler\b/i.test(low)) mode = "sliders";
-  else if (/matrix|gitter|raster|checkbox/i.test(low)) mode = "matrix";
-  else if (/zeitachse|line chart|liniendiagramm|verlauf/i.test(low)) mode = "line";
-
-  const cap = document.createElement("div");
-  cap.className = "dynamic-ui-cap";
-  cap.textContent = `Mock (${mode}) — ${interactive && role === "input" ? "interaktiv" : "Demonstration"}`;
-  host.appendChild(cap);
-
-  const body = document.createElement("div");
-  body.className = "dynamic-ui-body";
-
-  if (mode === "bars") {
-    const bars = document.createElement("div");
-    bars.className = "dyn-mock-chart dyn-mock-chart-bars";
-    [68, 45, 92, 55].forEach((h, i) => {
-      const col = document.createElement("div");
-      col.className = "dyn-bar-col";
-      const fill = document.createElement("div");
-      fill.className = "dyn-bar-fill";
-      fill.style.height = `${h}%`;
-      fill.title = `Q${i + 1}`;
-      const lab = document.createElement("span");
-      lab.className = "dyn-bar-lab";
-      lab.textContent = `Q${i + 1}`;
-      col.appendChild(fill);
-      col.appendChild(lab);
-      bars.appendChild(col);
-    });
-    body.appendChild(bars);
-  } else if (mode === "sliders") {
-    const sliders = [
-      ["Parameter A", "40"],
-      ["Parameter B", "70"],
-      ["Parameter C", "55"],
-    ];
-    sliders.forEach(([lbl, startVal]) => {
-      const row = document.createElement("div");
-      row.className = "dyn-slide-row";
-      const lab = document.createElement("label");
-      lab.className = "dyn-slide-label";
-      lab.textContent = lbl;
-      const rng = document.createElement("input");
-      rng.type = "range";
-      rng.min = "0";
-      rng.max = "100";
-      rng.value = startVal;
-      rng.disabled = !(interactive && role === "input");
-      rng.className = "dyn-slide-input";
-      rng.dataset.dynKey = `slider:${lbl}`;
-      const out = document.createElement("span");
-      out.className = "dyn-slide-val";
-      out.textContent = rng.value + "%";
-      if (!rng.disabled) {
-        rng.addEventListener("input", () => {
-          out.textContent = rng.value + "%";
-          if (syncWidgetsToServer) scheduleWorkshopDynamicUiWidgetPatch(rng.dataset.dynKey || "", String(rng.value));
-        });
-      }
-      row.appendChild(lab);
-      row.appendChild(rng);
-      row.appendChild(out);
-      body.appendChild(row);
-    });
-  } else if (mode === "matrix") {
-    const table = document.createElement("table");
-    table.className = "dyn-mock-matrix";
-    const thead = document.createElement("thead");
-    const hr = document.createElement("tr");
-    ["", "Kol. A", "Kol. B", "Kol. C"].forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      hr.appendChild(th);
-    });
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    const tb = document.createElement("tbody");
-    ["Zeile 1", "Zeile 2", "Zeile 3"].forEach((rw) => {
-      const tr = document.createElement("tr");
-      const th = document.createElement("th");
-      th.textContent = rw;
-      tr.appendChild(th);
-      for (let c = 0; c < 3; c += 1) {
-        const td = document.createElement("td");
-        const cx = document.createElement("input");
-        cx.type = "checkbox";
-        cx.disabled = !interactive || role !== "input";
-        cx.checked = !!(c + rw.length) % 2;
-        cx.dataset.dynKey = `matrix:${rw}:c${c}`;
-        if (!cx.disabled) {
-          cx.addEventListener("change", () => {
-            if (syncWidgetsToServer) {
-              scheduleWorkshopDynamicUiWidgetPatch(cx.dataset.dynKey || "", cx.checked ? "1" : "0");
-            }
-          });
-        }
-        td.appendChild(cx);
-        tr.appendChild(td);
-      }
-      tb.appendChild(tr);
-    });
-    table.appendChild(tb);
-    body.appendChild(table);
-  } else if (mode === "line") {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 280 120");
-    svg.className = "dyn-mock-line-svg";
-    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    poly.setAttribute("fill", "none");
-    poly.setAttribute("stroke", "#1a4f8a");
-    poly.setAttribute("stroke-width", "3");
-    poly.setAttribute("points", "10,90 70,55 140,72 210,38 268,62");
-    svg.appendChild(poly);
-    body.appendChild(svg);
-  } else {
-    const generic = document.createElement("div");
-    generic.className = "dyn-mock-generic";
-    const title = document.createElement("p");
-    title.className = "dyn-mock-generic-title";
-    title.textContent = "Freies UI‑Stub";
-    const blk = document.createElement("p");
-    blk.className = "dyn-mock-generic-body";
-    const clipped = p.length > 260 ? `${p.slice(0, 260)}…` : p;
-    blk.innerHTML =
-      `Keine speziellen Schlüsselwörter erkannt — später wandelt euer Modell das Prompt in echte Oberfläche um.<br/>` +
-      `<q>${escapeHtml(clipped)}</q>`;
-    generic.appendChild(title);
-    generic.appendChild(blk);
-    body.appendChild(generic);
-  }
-
-  host.appendChild(body);
+  renderDynamicUiEmpty(host);
 }
 
 function pickRunAnswerForForm(runAnswers, label) {
@@ -3661,8 +3520,8 @@ function renderDynamicUiModule(block, card) {
   ta.disabled = locked;
   ta.placeholder =
     block.role === "input"
-      ? "NL: z. B. Matrix … — oder JSON-Spec: {\"kind\":\"workshop-dynamic-ui\",\"version\":2,\"handlers\":[\"go\"],\"root\":{…}}"
-      : "NL-Stub-Schlüsselwörter — oder JSON mit dataSchema + root für echte Ausgabe.";
+      ? "Rohes HTML oder JSON: {\"kind\":\"workshop-dynamic-ui\",\"html\":\"<p>…</p>\",\"handlers\":[\"save\"]}"
+      : "HTML-Ausgabe oder JSON mit \"html\"; Modell: `data-ws-bind` / `data-ws-bind-src` für ui_data.";
 
   ta.value = String(block.values.uiPrompt ?? "");
   ta.addEventListener("input", () => {
@@ -3679,14 +3538,15 @@ function renderDynamicUiModule(block, card) {
   gen.disabled = locked;
   gen.addEventListener("click", () => {
     const txt = String(block.values.uiPrompt || "").trim();
-    const looksJson = txt.startsWith("{");
     if (!txt) {
-      showToast("Prompt ist leer.");
+      showToast("Inhalt ist leer.");
       return;
     }
     block.dynamicUiCommitted = txt;
     renderAll();
-    showToast(looksJson ? "Spec übernommen — deklarative Vorschau." : "NL-Vorschau aktualisiert — Prompt weiter editierbar.");
+    const looksHtml =
+      txt.startsWith("{") || /<[a-z][\s\S]*>/i.test(txt) || /<\//i.test(txt);
+    showToast(looksHtml ? "Vorschau aktualisiert (HTML / JSON)." : "Kein erkennbares HTML — bitte Tags oder JSON mit html-Feld.");
   });
 
   btns.appendChild(gen);
@@ -3694,14 +3554,14 @@ function renderDynamicUiModule(block, card) {
   const prevTitle = document.createElement("div");
   prevTitle.className = "composer-form-subtitle";
   const W = globalThis.workshopDynamicUi;
-  const parsedC = W ? W.parseCommitted(String(block.dynamicUiCommitted || "")) : { mode: "nl" };
-  const isSpec = parsedC.mode === "spec";
+  const parsedC = W ? W.parseCommitted(String(block.dynamicUiCommitted || "")) : { mode: "empty" };
+  const hasHtml = parsedC.mode === "html";
   if (block.role === "output" && (block._runDynamicUiPrompt || block._runDynamicUiSpecOverlay || block._runDynamicUiData)) {
-    prevTitle.textContent = isSpec
-      ? "Gerenderte Oberfläche (Spec v2) — Laufzeit / Modell"
-      : "Gerenderte Oberfläche (NL-Stub) — zuletzt per Modell-Tool";
+    prevTitle.textContent = hasHtml
+      ? "Gerenderte Oberfläche — Laufzeit / Modell"
+      : "Gerenderte Oberfläche — warte auf HTML / JSON";
   } else {
-    prevTitle.textContent = isSpec ? "Gerenderte Oberfläche (Spec v2)" : "Gerenderte Oberfläche (NL-Stub)";
+    prevTitle.textContent = hasHtml ? "Gerenderte Oberfläche" : "Gerenderte Oberfläche — noch leer";
   }
 
   const host = document.createElement("div");
@@ -4419,53 +4279,28 @@ async function handleRealtimeResponseDone(msg) {
             );
             outStr = JSON.stringify({ ok: false, error: "missing_payload" });
           } else {
-            const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
             const outs = state.blocks.filter((b) => b.role === "output" && b.typeId === "dynamic-ui");
             /** @type {string[]} */
             const notes = [];
 
-            if (uiSpec && W) {
-              const ok =
-                uiSpec.kind === "workshop-dynamic-ui" &&
-                Number(uiSpec.version) === 2 &&
-                uiSpec.root &&
-                typeof uiSpec.root === "object";
-              if (ok) {
-                outs.forEach((b) => {
-                  b._runDynamicUiSpecOverlay = /** @type {Record<string, unknown>} */ (JSON.parse(JSON.stringify(uiSpec)));
-                });
-                notes.push("Applied ui_spec overlay to output dynamic-ui block(s).");
-              } else {
-                notes.push("Ignored ui_spec (expected kind workshop-dynamic-ui, version 2, root).");
-              }
+            if (uiSpec) {
+              const copy = /** @type {Record<string, unknown>} */ (JSON.parse(JSON.stringify(uiSpec)));
+              outs.forEach((b) => {
+                b._runDynamicUiSpecOverlay = copy;
+              });
+              notes.push("Applied ui_spec overlay to output dynamic-ui block(s).");
             }
 
-            if (uiData && W) {
-              let applied = 0;
+            if (uiData) {
               /** @type {Record<string, unknown>} */
               const outDataPatch = {};
-              for (const b of outs) {
-                const schema = getDynamicUiOutputDataSchema(b);
-                if (!schema) continue;
-                const v = W.validateAgainstSchema(uiData, schema, "$");
-                if (!v.ok) {
-                  appendSystemTranscriptToTextOutputs(
-                    "Tool · workshop_emit_dynamic_ui",
-                    `ui_data validation failed for block ${b.id}:\n${v.errors.join("\n")}`,
-                    `tool:${callId}:err`,
-                  );
-                  outStr = JSON.stringify({ ok: false, error: "schema_validation_failed", errors: v.errors });
-                  renderAll();
-                  break;
-                }
-                b._runDynamicUiData = /** @type {Record<string, unknown>} */ (uiData);
-                outDataPatch[b.id] = uiData;
-                applied += 1;
-              }
-              if (!outStr && !applied) {
-                notes.push("ui_data not applied (no output block with dataSchema — commit a v2 spec or send ui_spec first).");
-              } else if (!outStr && applied) {
-                notes.push(`Validated and applied ui_data to ${applied} output block(s).`);
+              const dataCopy = /** @type {Record<string, unknown>} */ (JSON.parse(JSON.stringify(uiData)));
+              outs.forEach((b) => {
+                b._runDynamicUiData = dataCopy;
+                outDataPatch[b.id] = dataCopy;
+              });
+              if (outs.length) {
+                notes.push(`Applied ui_data to ${outs.length} output dynamic-ui block(s).`);
                 if (workshopSessionIds?.dynamicUiSessionId) {
                   void fetch("/api/workshop-session/dynamic-ui", {
                     method: "POST",
@@ -4477,9 +4312,9 @@ async function handleRealtimeResponseDone(msg) {
                     }),
                   });
                 }
+              } else {
+                notes.push("ui_data: no output dynamic-ui blocks in pipeline.");
               }
-            } else if (uiData) {
-              notes.push("ui_data ignored — structured UI helper not loaded.");
             }
 
             if (!outStr && uiPrompt) {

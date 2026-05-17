@@ -119,7 +119,7 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "form")
       return "- Output: structured form — call `workshop_emit_form_values` with `{ fields: [{ label, value }] }` when you have final values to show.";
     if (b.typeId === "dynamic-ui")
-      return "- Output: dynamic UI — call `workshop_emit_dynamic_ui` with `ui_prompt` (NL stub), and/or `ui_spec` + `ui_data` (JSON Schema + payload) for declarative bound views; validate `ui_data` against the active schema.";
+      return "- Output: dynamic UI — call `workshop_emit_dynamic_ui` with `ui_prompt` (HTML/text), `ui_spec` (e.g. `html` string), and/or `ui_data` (JSON for `data-ws-bind` fields in the markup).";
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
@@ -240,14 +240,17 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     if (b.typeId === "dynamic-ui") {
       const draft = String(b.values?.uiPrompt ?? "").trim();
       const staged = String(b.dynamicUiCommitted ?? "").trim();
-      const looksSpec = staged.startsWith("{") && staged.includes('"kind"') && staged.includes("workshop-dynamic-ui");
+      const looksHtmlSpec =
+        staged.startsWith("{") ||
+        (staged.includes('"kind"') && staged.includes("workshop-dynamic-ui")) ||
+        /<[a-z][\s\S]*>/i.test(staged);
       const body =
         draft || staged
-          ? `${draft ? `Draft prompt:\n${draft}\n\n` : ""}${staged ? (looksSpec ? `Committed JSON UI spec (v2):\n${staged}` : `Committed preview prompt:\n${staged}`) : ""}`.trim()
-          : "(empty UI prompt)";
+          ? `${draft ? `Draft:\n${draft}\n\n` : ""}${staged ? (looksHtmlSpec ? `Committed HTML / JSON UI:\n${staged}` : `Committed text:\n${staged}`) : ""}`.trim()
+          : "(empty)";
       events.push(
         conversationUserText(
-          `${label} — dynamic UI\n${body}${looksSpec ? "\n\n(After WebRTC connects, the host also sends an initial structured field-value JSON snapshot for v2 input specs.)" : ""}`,
+          `${label} — dynamic UI\n${body}${looksHtmlSpec ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for HTML inputs with data-wdui-path / name.)" : ""}`,
         ),
       );
       continue;

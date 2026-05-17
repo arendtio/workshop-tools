@@ -64,25 +64,23 @@ export function buildWorkshopEmitDynamicUiTool() {
     type: "function",
     name: "workshop_emit_dynamic_ui",
     description:
-      "Update workshop **output:dynamic-ui** card(s). Supply one or more of: " +
-      "`ui_prompt` (legacy NL stub: bars/matrix/sliders keywords), " +
-      "`ui_spec` (object: `kind: workshop-dynamic-ui`, `version: 2`, `dataSchema` JSON Schema, `root` view tree), " +
-      "`ui_data` (object validated against the active `dataSchema` then bound to the output view).",
+      "Update workshop **output:dynamic-ui** card(s). Supply any of: `ui_prompt` (HTML snippet or hint text), " +
+      "`ui_spec` (object, typically includes `html` string and optional `handlers` metadata), " +
+      "`ui_data` (arbitrary JSON merged into the preview — bind with `data-ws-bind` / `data-ws-bind-src` in the HTML).",
     parameters: {
       type: "object",
       properties: {
         ui_prompt: {
           type: "string",
-          description: "Optional NL UI spec (legacy keyword stub) for the dynamic UI output.",
+          description: "Optional HTML or short text pushed to the output preview.",
         },
         ui_spec: {
           type: "object",
-          description:
-            "Optional declarative v2 document (`kind: workshop-dynamic-ui`, `version: 2`, `root`, and for outputs `dataSchema`).",
+          description: "Optional overlay (e.g. `{ html: \"...\", handlers: [\"save\"] }`) applied to output dynamic-ui blocks.",
         },
         ui_data: {
           type: "object",
-          description: "Optional JSON payload for the output view; must validate against the committed or tool-provided dataSchema.",
+          description: "Optional JSON object applied to output previews (no server-side schema enforcement).",
         },
       },
     },
