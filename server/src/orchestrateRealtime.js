@@ -119,7 +119,7 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "form")
       return "- Output: structured form — call `workshop_emit_form_values` with `{ fields: [{ label, value }] }` when you have final values to show.";
     if (b.typeId === "dynamic-ui")
-      return "- Output: NL-driven UI — call `workshop_emit_dynamic_ui` with `{ ui_prompt }` when you should refresh the rendered preview.";
+      return "- Output: dynamic UI — call `workshop_emit_dynamic_ui` with `ui_prompt` (NL stub), and/or `ui_spec` + `ui_data` (JSON Schema + payload) for declarative bound views; validate `ui_data` against the active schema.";
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
@@ -240,11 +240,16 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     if (b.typeId === "dynamic-ui") {
       const draft = String(b.values?.uiPrompt ?? "").trim();
       const staged = String(b.dynamicUiCommitted ?? "").trim();
+      const looksSpec = staged.startsWith("{") && staged.includes('"kind"') && staged.includes("workshop-dynamic-ui");
       const body =
         draft || staged
-          ? `${draft ? `Draft prompt:\n${draft}\n\n` : ""}${staged ? `Committed preview prompt:\n${staged}` : ""}`.trim()
+          ? `${draft ? `Draft prompt:\n${draft}\n\n` : ""}${staged ? (looksSpec ? `Committed JSON UI spec (v2):\n${staged}` : `Committed preview prompt:\n${staged}`) : ""}`.trim()
           : "(empty UI prompt)";
-      events.push(conversationUserText(`${label} — dynamic UI\n${body}`));
+      events.push(
+        conversationUserText(
+          `${label} — dynamic UI\n${body}${looksSpec ? "\n\n(After WebRTC connects, the host also sends an initial structured field-value JSON snapshot for v2 input specs.)" : ""}`,
+        ),
+      );
       continue;
     }
 

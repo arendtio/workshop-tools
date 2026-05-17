@@ -411,7 +411,7 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "NL UI spec → lightweight mock preview (sliders/matrix). During a Realtime run, interactive widgets PATCH server state so `workshop_dynamic_ui_read_state` returns participant values.",
+      "NL stub **or** JSON spec (`kind: workshop-dynamic-ui`, `version: 2`): declarative fields, buttons with allowlisted `handlers`, values PATCH the run session. On push / run, field JSON is sent to the model; button clicks emit structured handler events on the Realtime channel.",
     defaults: {
       uiPrompt: "Drei Slider für Budget, Risiko und Zufriedenheit (je 0–100).",
     },
@@ -425,7 +425,7 @@ const FORM_SCHEMA = {
   },
   "output:dynamic-ui": {
     apiMapping:
-      "Realtime `workshop_emit_dynamic_ui` updates the output preview. With any dynamic-ui module, `workshop_dynamic_ui_read_state` / `workshop_dynamic_ui_apply_data` read or merge NL + widget values persisted for this run (participant sliders sync when a session exists).",
+      "Realtime `workshop_emit_dynamic_ui` accepts `ui_spec` (v2 layout + `dataSchema`), `ui_data` (JSON validated against that schema), and/or legacy `ui_prompt` (NL stub). Renders declarative views (labels, bars, fields) bound to model JSON when a schema is present; session read/apply includes widgets + `outputData`.",
     defaults: {
       uiPrompt: "Ein Balkendiagramm mit vier Balken für Q1–Q4 (Demo-Zahlen).",
     },
@@ -490,7 +490,7 @@ const FORM_SCHEMA = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _runAudioDataUrl?: string, _runAudioGenerating?: boolean, _formRunAnswers?: Record<string, string>, _runDynamicUiPrompt?: string, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _runAudioDataUrl?: string, _runAudioGenerating?: boolean, _formRunAnswers?: Record<string, string>, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown>, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
@@ -765,6 +765,14 @@ function collectDynamicUiWidgetValuesFromDom(blockId) {
       out[key] = String(el.value);
     }
   });
+  const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+  if (W && typeof W.collectFieldValuesFromDom === "function") {
+    const fv = W.collectFieldValuesFromDom(blockId);
+    for (const [k, v] of Object.entries(fv)) {
+      out[`field:${k}`] = v;
+      out[k] = v;
+    }
+  }
   return out;
 }
 
@@ -879,9 +887,18 @@ async function pushSingleInputModuleToRealtime(dc, block) {
     } else {
       widgetJson = JSON.stringify(collectDynamicUiWidgetValuesFromDom(block.id), null, 2);
     }
+    let extraFields = "";
+    const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+    if (W) {
+      const p = W.parseCommitted(staged);
+      if (p.mode === "spec") {
+        const fields = W.collectFieldValuesFromDom(block.id);
+        extraFields = `\n\nStructured field values (JSON):\n${JSON.stringify(fields, null, 2)}`;
+      }
+    }
     sendRealtimeUserTextItem(
       dc,
-      `${label} — dynamic UI\nDraft:\n${draft || "(empty)"}\n\nCommitted preview:\n${staged || "(none)"}\n\nWidget snapshot (keys from interactive preview or server session):\n${widgetJson}`,
+      `${label} — dynamic UI\nDraft:\n${draft || "(empty)"}\n\nCommitted preview:\n${staged || "(none)"}\n\nWidget snapshot (keys from interactive preview or server session):\n${widgetJson}${extraFields}`,
     );
     return;
   }
@@ -1173,6 +1190,29 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
   }
 }
 
+/**
+ * After server bootstrap items, send one structured JSON snapshot per input dynamic-ui v2 spec.
+ * @param {RTCDataChannel} dc
+ */
+function sendDynamicUiSpecInitialFieldSnapshots(dc) {
+  const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+  if (!W || dc.readyState !== "open") return;
+  for (const b of state.blocks) {
+    if (b.role !== "input" || b.typeId !== "dynamic-ui") continue;
+    const staged = String(b.dynamicUiCommitted || "").trim();
+    const p = W.parseCommitted(staged);
+    if (p.mode !== "spec") continue;
+    const fields = W.collectFieldValuesFromDom(b.id);
+    const def = findDef(b.role, b.typeId);
+    const partTitle = def ? def.title : b.typeId;
+    const label = `Input · ${b.typeId}${b.id ? ` (${b.id})` : ""} — ${partTitle}`;
+    sendRealtimeUserTextItem(
+      dc,
+      `${label} — initial structured field snapshot (run start)\n\n${JSON.stringify(fields, null, 2)}`,
+    );
+  }
+}
+
 function releasePttCtrlHotkey() {
   if (!pttCtrlMicEngaged) return;
   pttCtrlMicEngaged = false;
@@ -1300,6 +1340,8 @@ async function startRealtimeRun() {
       }
       if (b.role === "output" && b.typeId === "dynamic-ui") {
         delete b._runDynamicUiPrompt;
+        delete b._runDynamicUiData;
+        delete b._runDynamicUiSpecOverlay;
       }
     }
     seedTextOutputTranscriptLogsFromPipeline();
@@ -1344,6 +1386,7 @@ async function startRealtimeRun() {
       void (async () => {
         try {
           await mergeRealtimeBootstrapUserItems(dc, bootstrapEvents);
+          sendDynamicUiSpecInitialFieldSnapshots(dc);
         } catch (e) {
           console.warn("Realtime bootstrap merge failed", e);
         }
@@ -2417,10 +2460,16 @@ function gatherConversationSnapshotForTextOutput() {
       } else if (b.typeId === "dynamic-ui") {
         const draft = String(b.values.uiPrompt || "").trim();
         const staged = String(b.dynamicUiCommitted || "").trim();
-        body =
-          draft || staged
-            ? `${draft ? `Draft: ${draft}\n` : ""}${staged ? `Preview commits to: ${staged}` : ""}`.trim()
-            : "(prompt empty)";
+        const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+        const parsed = W ? W.parseCommitted(staged) : { mode: "nl", text: staged };
+        if (parsed.mode === "spec") {
+          body = `Dynamic UI v2 (committed JSON, ${staged.length} chars). Draft NL: ${draft || "(empty)"}`;
+        } else {
+          body =
+            draft || staged
+              ? `${draft ? `Draft: ${draft}\n` : ""}${staged ? `Preview commits to: ${staged}` : ""}`.trim()
+              : "(prompt empty)";
+        }
         userTurns.push({
           label: `UI brief · ${partTitle}`,
           body,
@@ -2967,10 +3016,92 @@ function parseFormOptions(optionsStr) {
 }
 
 /**
+ * @param {HTMLElement} host
+ * @param {{ id: string, role: string, typeId: string, dynamicUiCommitted?: string, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown> }} block
+ * @param {boolean} interactive
+ * @param {boolean} syncWidgetsToServer
+ */
+function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
+  const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+  const committed = String(block.dynamicUiCommitted ?? "").trim();
+  const parsedBase = W ? W.parseCommitted(committed) : { mode: "nl", text: committed };
+
+  if (block.role === "output") {
+    const overlay =
+      block._runDynamicUiSpecOverlay && typeof block._runDynamicUiSpecOverlay === "object"
+        ? block._runDynamicUiSpecOverlay
+        : null;
+    const spec = overlay || (parsedBase.mode === "spec" ? parsedBase.spec : null);
+    if (spec && W) {
+      W.renderInto(host, spec, "output", { interactive: false, data: block._runDynamicUiData || {} });
+      return;
+    }
+    const nl = String(block._runDynamicUiPrompt || committed).trim();
+    renderDynamicUiNlMock(host, nl, false, "output", false);
+    return;
+  }
+
+  if (parsedBase.mode === "spec" && W) {
+    const canSync = !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId);
+    W.renderInto(host, parsedBase.spec, "input", {
+      interactive,
+      schedulePatch: canSync ? (key, val) => scheduleWorkshopDynamicUiWidgetPatch(key, val) : undefined,
+      onHandler: (handlerName, detail) => {
+        if (state.running && realtimeDataChannel && realtimeDataChannel.readyState === "open") {
+          const label = `Input · dynamic-ui${block.id ? ` (${block.id})` : ""}`;
+          const payload = {
+            workshop: "dynamic-ui-handler-v1",
+            blockId: block.id,
+            handler: handlerName,
+            detail: detail || null,
+          };
+          sendRealtimeUserTextItem(
+            realtimeDataChannel,
+            `${label}\n\n${JSON.stringify(payload, null, 2)}`,
+          );
+        }
+      },
+    });
+    return;
+  }
+
+  const nl = committed;
+  renderDynamicUiNlMock(
+    host,
+    nl,
+    interactive,
+    "input",
+    !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId),
+  );
+}
+
+/**
+ * JSON Schema used to validate `ui_data` for an output dynamic-ui block (overlay wins over committed spec).
+ * @param {{ dynamicUiCommitted?: string, _runDynamicUiSpecOverlay?: Record<string, unknown> }} block
+ * @returns {Record<string, unknown> | null}
+ */
+function getDynamicUiOutputDataSchema(block) {
+  const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+  if (!W) return null;
+  const overlay =
+    block._runDynamicUiSpecOverlay && typeof block._runDynamicUiSpecOverlay === "object"
+      ? block._runDynamicUiSpecOverlay
+      : null;
+  if (overlay && overlay.dataSchema && typeof overlay.dataSchema === "object") {
+    return /** @type {Record<string, unknown>} */ (overlay.dataSchema);
+  }
+  const p = W.parseCommitted(String(block.dynamicUiCommitted || ""));
+  if (p.mode === "spec" && p.spec.dataSchema && typeof p.spec.dataSchema === "object") {
+    return /** @type {Record<string, unknown>} */ (p.spec.dataSchema);
+  }
+  return null;
+}
+
+/**
  * Stub UI from keywords in `committedPrompt`.
  * @param {boolean} [syncWidgetsToServer] when true, interactive input widgets PATCH `/api/workshop-session/dynamic-ui`.
  */
-function renderDynamicUiPreview(host, committedPrompt, interactive, role, syncWidgetsToServer) {
+function renderDynamicUiNlMock(host, committedPrompt, interactive, role, syncWidgetsToServer) {
   host.innerHTML = "";
   host.className = "dynamic-ui-stage";
 
@@ -3523,15 +3654,15 @@ function renderDynamicUiModule(block, card) {
 
   const lbl = document.createElement("label");
   lbl.className = "dynamic-ui-prompt-label";
-  lbl.textContent = "UI-Prompt bearbeiten";
+  lbl.textContent = "UI-Prompt oder JSON-Spec";
   const ta = document.createElement("textarea");
   ta.className = "dynamic-ui-prompt-field";
   ta.rows = 4;
   ta.disabled = locked;
   ta.placeholder =
     block.role === "input"
-      ? "Beispiel: Matrix mit Checkboxen für Nutzen, Aufwand, Risiko pro Idee …"
-      : "Beispiel: Balkendiagramm mit vier Quartalswerten …";
+      ? "NL: z. B. Matrix … — oder JSON-Spec: {\"kind\":\"workshop-dynamic-ui\",\"version\":2,\"handlers\":[\"go\"],\"root\":{…}}"
+      : "NL-Stub-Schlüsselwörter — oder JSON mit dataSchema + root für echte Ausgabe.";
 
   ta.value = String(block.values.uiPrompt ?? "");
   ta.addEventListener("input", () => {
@@ -3548,34 +3679,36 @@ function renderDynamicUiModule(block, card) {
   gen.disabled = locked;
   gen.addEventListener("click", () => {
     const txt = String(block.values.uiPrompt || "").trim();
+    const looksJson = txt.startsWith("{");
     if (!txt) {
       showToast("Prompt ist leer.");
       return;
     }
     block.dynamicUiCommitted = txt;
     renderAll();
-    showToast("Mock-Vorschau aktualisiert — Prompt weiter editierbar.");
+    showToast(looksJson ? "Spec übernommen — deklarative Vorschau." : "NL-Vorschau aktualisiert — Prompt weiter editierbar.");
   });
 
   btns.appendChild(gen);
 
   const prevTitle = document.createElement("div");
   prevTitle.className = "composer-form-subtitle";
-  prevTitle.textContent =
-    block.role === "output" && block._runDynamicUiPrompt
-      ? "Gerenderte Oberfläche (Mock) — zuletzt per Modell-Tool"
-      : "Gerenderte Oberfläche (Mock)";
+  const W = globalThis.workshopDynamicUi;
+  const parsedC = W ? W.parseCommitted(String(block.dynamicUiCommitted || "")) : { mode: "nl" };
+  const isSpec = parsedC.mode === "spec";
+  if (block.role === "output" && (block._runDynamicUiPrompt || block._runDynamicUiSpecOverlay || block._runDynamicUiData)) {
+    prevTitle.textContent = isSpec
+      ? "Gerenderte Oberfläche (Spec v2) — Laufzeit / Modell"
+      : "Gerenderte Oberfläche (NL-Stub) — zuletzt per Modell-Tool";
+  } else {
+    prevTitle.textContent = isSpec ? "Gerenderte Oberfläche (Spec v2)" : "Gerenderte Oberfläche (NL-Stub)";
+  }
 
   const host = document.createElement("div");
-  const previewCommitted =
-    block.role === "output"
-      ? String(block._runDynamicUiPrompt || block.dynamicUiCommitted || "").trim()
-      : String(block.dynamicUiCommitted || "").trim();
-  renderDynamicUiPreview(
+  renderDynamicUiBlock(
     host,
-    previewCommitted,
+    block,
     interactive,
-    block.role,
     interactive && block.role === "input" && !!workshopSessionIds?.dynamicUiSessionId,
   );
 
@@ -4276,37 +4409,106 @@ async function handleRealtimeResponseDone(msg) {
             args = {};
           }
           const uiPrompt = String(args.ui_prompt ?? "").trim();
-          if (!uiPrompt) {
+          const uiSpec = args.ui_spec && typeof args.ui_spec === "object" ? args.ui_spec : null;
+          const uiData = args.ui_data && typeof args.ui_data === "object" ? args.ui_data : null;
+          if (!uiPrompt && !uiSpec && !uiData) {
             appendSystemTranscriptToTextOutputs(
               "Tool · workshop_emit_dynamic_ui",
-              "Call skipped — no ui_prompt.",
+              "Call skipped — provide ui_prompt, ui_spec, and/or ui_data.",
               `tool:${callId}:skip`,
             );
-            outStr = JSON.stringify({ ok: false, error: "missing_ui_prompt" });
+            outStr = JSON.stringify({ ok: false, error: "missing_payload" });
           } else {
-            state.blocks
-              .filter((b) => b.role === "output" && b.typeId === "dynamic-ui")
-              .forEach((b) => {
+            const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
+            const outs = state.blocks.filter((b) => b.role === "output" && b.typeId === "dynamic-ui");
+            /** @type {string[]} */
+            const notes = [];
+
+            if (uiSpec && W) {
+              const ok =
+                uiSpec.kind === "workshop-dynamic-ui" &&
+                Number(uiSpec.version) === 2 &&
+                uiSpec.root &&
+                typeof uiSpec.root === "object";
+              if (ok) {
+                outs.forEach((b) => {
+                  b._runDynamicUiSpecOverlay = /** @type {Record<string, unknown>} */ (JSON.parse(JSON.stringify(uiSpec)));
+                });
+                notes.push("Applied ui_spec overlay to output dynamic-ui block(s).");
+              } else {
+                notes.push("Ignored ui_spec (expected kind workshop-dynamic-ui, version 2, root).");
+              }
+            }
+
+            if (uiData && W) {
+              let applied = 0;
+              /** @type {Record<string, unknown>} */
+              const outDataPatch = {};
+              for (const b of outs) {
+                const schema = getDynamicUiOutputDataSchema(b);
+                if (!schema) continue;
+                const v = W.validateAgainstSchema(uiData, schema, "$");
+                if (!v.ok) {
+                  appendSystemTranscriptToTextOutputs(
+                    "Tool · workshop_emit_dynamic_ui",
+                    `ui_data validation failed for block ${b.id}:\n${v.errors.join("\n")}`,
+                    `tool:${callId}:err`,
+                  );
+                  outStr = JSON.stringify({ ok: false, error: "schema_validation_failed", errors: v.errors });
+                  renderAll();
+                  break;
+                }
+                b._runDynamicUiData = /** @type {Record<string, unknown>} */ (uiData);
+                outDataPatch[b.id] = uiData;
+                applied += 1;
+              }
+              if (!outStr && !applied) {
+                notes.push("ui_data not applied (no output block with dataSchema — commit a v2 spec or send ui_spec first).");
+              } else if (!outStr && applied) {
+                notes.push(`Validated and applied ui_data to ${applied} output block(s).`);
+                if (workshopSessionIds?.dynamicUiSessionId) {
+                  void fetch("/api/workshop-session/dynamic-ui", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      action: "patch",
+                      session_id: workshopSessionIds.dynamicUiSessionId,
+                      patch: { outputData: outDataPatch },
+                    }),
+                  });
+                }
+              }
+            } else if (uiData) {
+              notes.push("ui_data ignored — structured UI helper not loaded.");
+            }
+
+            if (!outStr && uiPrompt) {
+              outs.forEach((b) => {
                 b._runDynamicUiPrompt = uiPrompt;
               });
-            appendSystemTranscriptToTextOutputs(
-              "Tool · workshop_emit_dynamic_ui",
-              `Updated dynamic UI preview.\n\n${uiPrompt.slice(0, 800)}${uiPrompt.length > 800 ? "…" : ""}`,
-              `tool:${callId}:done`,
-            );
-            outStr = JSON.stringify({ ok: true, message: "Dynamic UI output updated." });
-            if (workshopSessionIds?.dynamicUiSessionId) {
-              void fetch("/api/workshop-session/dynamic-ui", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  action: "patch",
-                  session_id: workshopSessionIds.dynamicUiSessionId,
-                  patch: { nlPrompt: uiPrompt },
-                }),
-              });
+              notes.push(`NL preview: ${uiPrompt.slice(0, 400)}${uiPrompt.length > 400 ? "…" : ""}`);
             }
-            renderAll();
+
+            if (!outStr) {
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_emit_dynamic_ui",
+                notes.join("\n\n") || "Updated.",
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify({ ok: true, message: "Dynamic UI output updated.", notes });
+              if (workshopSessionIds?.dynamicUiSessionId && uiPrompt) {
+                void fetch("/api/workshop-session/dynamic-ui", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    action: "patch",
+                    session_id: workshopSessionIds.dynamicUiSessionId,
+                    patch: { nlPrompt: uiPrompt },
+                  }),
+                });
+              }
+              renderAll();
+            }
           }
         } else if (name === "workshop_mock_tooling_call") {
           let args = {};
@@ -4393,6 +4595,19 @@ async function handleRealtimeResponseDone(msg) {
                   .filter((b) => b.role === "output" && b.typeId === "dynamic-ui")
                   .forEach((b) => {
                     b._runDynamicUiPrompt = np;
+                  });
+              }
+              if (data.outputData && typeof data.outputData === "object") {
+                const od = /** @type {Record<string, unknown>} */ (data.outputData);
+                state.blocks
+                  .filter((b) => b.role === "output" && b.typeId === "dynamic-ui")
+                  .forEach((b) => {
+                    if (Object.prototype.hasOwnProperty.call(od, b.id)) {
+                      const v = od[b.id];
+                      if (v && typeof v === "object" && !Array.isArray(v)) {
+                        b._runDynamicUiData = /** @type {Record<string, unknown>} */ (v);
+                      }
+                    }
                   });
               }
               renderAll();

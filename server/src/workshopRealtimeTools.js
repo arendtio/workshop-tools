@@ -64,17 +64,27 @@ export function buildWorkshopEmitDynamicUiTool() {
     type: "function",
     name: "workshop_emit_dynamic_ui",
     description:
-      "Refresh workshop **output:dynamic-ui** card(s) with a natural-language UI specification; " +
-      "the client renders a lightweight preview from keywords (bars, matrix, line chart, sliders).",
+      "Update workshop **output:dynamic-ui** card(s). Supply one or more of: " +
+      "`ui_prompt` (legacy NL stub: bars/matrix/sliders keywords), " +
+      "`ui_spec` (object: `kind: workshop-dynamic-ui`, `version: 2`, `dataSchema` JSON Schema, `root` view tree), " +
+      "`ui_data` (object validated against the active `dataSchema` then bound to the output view).",
     parameters: {
       type: "object",
       properties: {
         ui_prompt: {
           type: "string",
-          description: "NL UI spec for the dynamic UI output (any language).",
+          description: "Optional NL UI spec (legacy keyword stub) for the dynamic UI output.",
+        },
+        ui_spec: {
+          type: "object",
+          description:
+            "Optional declarative v2 document (`kind: workshop-dynamic-ui`, `version: 2`, `root`, and for outputs `dataSchema`).",
+        },
+        ui_data: {
+          type: "object",
+          description: "Optional JSON payload for the output view; must validate against the committed or tool-provided dataSchema.",
         },
       },
-      required: ["ui_prompt"],
     },
   };
 }
@@ -127,8 +137,8 @@ export function buildWorkshopDynamicUiReadStateTool(plan) {
     type: "function",
     name: "workshop_dynamic_ui_read_state",
     description:
-      "Read the persisted dynamic-UI snapshot for this run: latest NL prompt plus widget values the host synced. " +
-      `Session ${short}. Call before answering if you need current slider/checkbox values from the participant.`,
+      "Read the persisted dynamic-UI snapshot for this run: NL prompt, widget values the host synced, and `outputData` keyed by block id (validated model JSON for declarative outputs). " +
+      `Session ${short}. Call before answering if you need current participant field values or rendered output data.`,
     parameters: {
       type: "object",
       properties: {},
@@ -147,7 +157,7 @@ export function buildWorkshopDynamicUiApplyDataTool(plan) {
     name: "workshop_dynamic_ui_apply_data",
     description:
       "Merge JSON into the dynamic UI session so the next read_state reflects it. " +
-      `Session ${short}. Typical keys: nlPrompt (string), widgets (object of string keys to string/number/boolean values).`,
+      `Session ${short}. Typical keys: nlPrompt (string), widgets (object), outputData (object keyed by output block id).`,
     parameters: {
       type: "object",
       properties: {

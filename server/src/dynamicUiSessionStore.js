@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 const MAX_SESSIONS = 200;
 /** @type {string[]} */
 const fifo = [];
-/** @type {Map<string, { widgets: Record<string, unknown>, nlPrompt: string }>} */
+/** @type {Map<string, { widgets: Record<string, unknown>, nlPrompt: string, outputData: Record<string, unknown> }>} */
 const sessions = new Map();
 
 function evict() {
@@ -14,7 +14,7 @@ function evict() {
 }
 
 function emptyState() {
-  return { widgets: {}, nlPrompt: "" };
+  return { widgets: {}, nlPrompt: "", outputData: {} };
 }
 
 /**
@@ -68,6 +68,7 @@ function snapshot(s) {
   return {
     nlPrompt: String(s.nlPrompt || ""),
     widgets: { ...s.widgets },
+    outputData: { ...s.outputData },
   };
 }
 
@@ -81,6 +82,12 @@ function deepMerge(target, patch) {
     if (k === "widgets" && isRecord(v) && isRecord(target.widgets)) {
       for (const [wk, wv] of Object.entries(v)) {
         target.widgets[wk] = wv;
+      }
+      continue;
+    }
+    if (k === "outputData" && isRecord(v) && isRecord(target.outputData)) {
+      for (const [bk, bv] of Object.entries(v)) {
+        target.outputData[bk] = bv;
       }
       continue;
     }

@@ -268,4 +268,21 @@ describe("HTTP API", () => {
     expect(r.body.state.nlPrompt).toBe("sliders");
     expect(r.body.state.widgets["slider:A"]).toBe("12");
   });
+
+  it("POST /api/workshop-session/dynamic-ui merges outputData", async () => {
+    const sid = createDynamicUiSession();
+    const app = createApp({ staticRoot });
+    await request(app)
+      .post("/api/workshop-session/dynamic-ui")
+      .send({
+        action: "patch",
+        session_id: sid,
+        patch: { outputData: { blockA: { score: 3 } } },
+      })
+      .expect(200);
+    const r = await request(app)
+      .post("/api/workshop-session/dynamic-ui")
+      .send({ action: "read", session_id: sid });
+    expect(r.body.state.outputData.blockA).toEqual({ score: 3 });
+  });
 });
