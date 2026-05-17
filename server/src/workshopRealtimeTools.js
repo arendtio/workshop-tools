@@ -135,8 +135,9 @@ export function buildWorkshopDynamicUiReadStateTool(plan) {
     type: "function",
     name: "workshop_dynamic_ui_read_state",
     description:
-      "Read the persisted dynamic-UI snapshot for this run: NL prompt, widget values the host synced, and `outputData` keyed by block id (validated model JSON for declarative outputs). " +
-      `Session ${short}. Call before answering if you need current participant field values or rendered output data.`,
+      "Read the persisted dynamic-UI snapshot for this run: NL prompt, widget values the host synced, and `outputData` keyed by block id. " +
+      "Participant handler events arrive as user messages whose JSON includes `detail.state` (full flat field map) when `input:dynamic-ui` uses `data-ws-handler`. " +
+      `Session ${short}. Call before answering if you need current field values or merged output JSON.`,
     parameters: {
       type: "object",
       properties: {},

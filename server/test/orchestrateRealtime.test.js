@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildFullRealtimeInstructions, buildRealtimeBootstrapClientEvents } from "../src/orchestrateRealtime.js";
+import {
+  buildFullRealtimeInstructions,
+  buildRealtimeBootstrapClientEvents,
+  DYNAMIC_UI_INPUT_PLATFORM_CONTRACT,
+} from "../src/orchestrateRealtime.js";
 
 describe("orchestrateRealtime", () => {
   it("includes vector and tooling context in instructions", () => {
@@ -90,5 +94,46 @@ describe("orchestrateRealtime", () => {
     expect(events).toHaveLength(1);
     const content = events[0].item.content;
     expect(content.some((c) => c.type === "input_image")).toBe(true);
+  });
+
+  it("appends dynamic UI platform contract to instructions when input dynamic-ui exists", () => {
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        { role: "input", typeId: "dynamic-ui", values: {}, dynamicUiCommitted: "" },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(text).toContain("data-ws-handler");
+    expect(text).toContain("detail.state");
+    expect(DYNAMIC_UI_INPUT_PLATFORM_CONTRACT.length).toBeGreaterThan(80);
+  });
+
+  it("omits dynamic UI platform contract without input dynamic-ui", () => {
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        { role: "input", typeId: "text", values: { content: "hi" } },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(text).not.toContain("input module `dynamic-ui`");
+  });
+
+  it("includes dynamic UI platform contract in bootstrap for dynamic-ui input", () => {
+    const events = buildRealtimeBootstrapClientEvents({
+      blocks: [
+        {
+          id: "du1",
+          role: "input",
+          typeId: "dynamic-ui",
+          values: { uiPrompt: "sliders" },
+          dynamicUiCommitted: "<p>x</p>",
+        },
+        { id: "o", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(events).toHaveLength(1);
+    const t = events[0].item.content[0].text;
+    expect(t).toContain("Draft:");
+    expect(t).toContain("data-ws-handler");
   });
 });

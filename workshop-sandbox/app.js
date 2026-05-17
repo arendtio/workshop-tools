@@ -411,12 +411,20 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "Freies HTML (oder JSON `kind: workshop-dynamic-ui` mit `html`-String). `data-ws-handler` auf Controls → Klick sendet Realtime-Events; `data-wdui-path` oder `name` auf Feldern → Werte landen im Session-Snapshot / Push-JSON.",
+      "Rohes HTML oder JSON mit `html`. Das Modell erhält automatisch einen **Plattform-Vertrag** (Orchestrator + Bootstrap): `data-wdui-path`/`name` für Werte, `data-ws-handler` für Events — bei Bedienung wird ein JSON-Ereignis **inkl. vollständigem Feld-Snapshot `detail.state`** an Realtime gesendet (Sliders: `input`/`change`).",
     defaults: {
       uiPrompt:
         '{"kind":"workshop-dynamic-ui","html":"<p>Demo</p><label>Note <input data-wdui-path=\\"note\\" /></label><button type=\\"button\\" data-ws-handler=\\"save\\">OK</button>","handlers":["save"]}',
     },
-    fields: [],
+    fields: [
+      {
+        key: "_dynHint",
+        label: "",
+        type: "hint",
+        hint:
+          "Der kurze Entwurf des Teilnehmers reicht oft nur als Idee. System-Instruktionen ergänzen für das Modell, wie Handler und Snapshots funktionieren — siehe auch den fest eingebundenen Vertrag in den Realtime-Instructions / Bootstrap.",
+      },
+    ],
   },
   "output:form": {
     apiMapping:
@@ -3072,7 +3080,7 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
     }
     const hs = htmlSpecForOutput();
     if (hs) {
-      W.renderInto(host, hs, "output", { interactive: false, data: block._runDynamicUiData || {} });
+      W.renderInto(host, hs, "output", { interactive: false, data: block._runDynamicUiData || {}, blockId: block.id });
       return;
     }
     renderDynamicUiEmpty(host);
@@ -3087,6 +3095,7 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
     const canSync = !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId);
     W.renderInto(host, { html: parsedBase.html, handlers: parsedBase.handlers || [] }, "input", {
       interactive,
+      blockId: block.id,
       schedulePatch: canSync ? (key, val) => scheduleWorkshopDynamicUiWidgetPatch(key, val) : undefined,
       onHandler: (handlerName, detail) => {
         if (state.running && realtimeDataChannel && realtimeDataChannel.readyState === "open") {

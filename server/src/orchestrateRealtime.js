@@ -25,6 +25,33 @@ const TOOLING_DOMAIN_LABEL = {
   other: "Sonstiges",
 };
 
+/** Appended to model context whenever an `input:dynamic-ui` block exists (also appended to that block’s bootstrap item). */
+export const DYNAMIC_UI_INPUT_PLATFORM_CONTRACT =
+  "## Workshop: input module `dynamic-ui` (HTML or JSON with an `html` string)\n\n" +
+  "The participant **draft** only states what they want (e.g. three sliders for quality, time, budget). " +
+  "Markup you produce must still satisfy the **platform wiring** below so follow-up reasoning and tools get structured signals.\n\n" +
+  "### Field capture\n" +
+  "- On every value control add `data-wdui-path=\"<key>\"` **or** a unique HTML `name`. " +
+  "Those values are merged into JSON snapshots, `workshop_dynamic_ui_read_state`, and the debounced widget patch for this run.\n\n" +
+  "### Handler events → model (follow-up)\n" +
+  "- On **interactive** elements add `data-ws-handler=\"<handlerId>\"` (any non-empty id).\n" +
+  "- **Form controls** (`input`, `textarea`, `select`, including `type=\"range\"`): the host emits on **`input` and `change`**.\n" +
+  "- **Other elements** (e.g. `button`, `a`): the host emits on **`click`**.\n" +
+  "- Each emission is a user text item whose JSON body includes `workshop: \"dynamic-ui-handler-v1\"`, `blockId`, `handler`, and `detail`: " +
+  "`{ tag, trigger, state }` where **`state` is a flat string map of all current field values in this UI** (generic full snapshot, not only the control that fired). " +
+  "Downstream logic can read the latest values from `detail.state` without custom per-widget plumbing.\n\n" +
+  "Example range slider:\n" +
+  "`<input type=\"range\" min=\"0\" max=\"100\" data-wdui-path=\"quality\" data-ws-handler=\"qualityMoved\" />`\n\n" +
+  "The optional JSON `handlers` array is **documentation for humans only**; the runtime does not filter handler names.\n\n" +
+  "**Kurz (DE):** Der Entwurf des Teilnehmers beschreibt nur die UI-Idee. Sie müssen `data-wdui-path`/`name` setzen und bei Bedarf `data-ws-handler`, damit bei Interaktion ein Ereignis **inkl. kompletter Feld-Snapshot (`detail.state`)** an das Modell geht.\n";
+
+/**
+ * @param {{ blocks: { role: string, typeId: string }[] }} plan
+ */
+function planHasInputDynamicUi(plan) {
+  return plan.blocks.some((b) => b.role === "input" && b.typeId === "dynamic-ui");
+}
+
 /**
  * @param {unknown} v
  * @returns {v is Record<string, unknown>}
@@ -97,6 +124,7 @@ export function buildFullRealtimeInstructions(plan) {
   parts.push(describeConfiguredOutputs(plan));
   const liveImage = liveAudioImageOutputGuidance(plan);
   if (liveImage) parts.push(liveImage);
+  if (planHasInputDynamicUi(plan)) parts.push(DYNAMIC_UI_INPUT_PLATFORM_CONTRACT);
 
   const merged = parts.join("\n\n").trim();
   return merged || "You are a helpful workshop assistant.";
@@ -250,7 +278,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
           : "(empty)";
       events.push(
         conversationUserText(
-          `${label} — dynamic UI\n${body}${looksHtmlSpec ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for HTML inputs with data-wdui-path / name.)" : ""}`,
+          `${label} — dynamic UI\n${body}${looksHtmlSpec ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for HTML inputs with data-wdui-path / name.)" : ""}\n\n${DYNAMIC_UI_INPUT_PLATFORM_CONTRACT}`,
         ),
       );
       continue;
