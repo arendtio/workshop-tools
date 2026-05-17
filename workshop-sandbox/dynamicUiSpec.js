@@ -1,10 +1,10 @@
 /**
- * Workshop dynamic UI — HTML-first, sandbox-style (innerHTML). Loaded before app.js.
+ * Workshop dynamic UI — participant markup is **HTML only** (innerHTML).
+ * Tooling may still send `{ html: "..." }` overlays; this file only parses **committed** strings as HTML.
  * Exposes `globalThis.workshopDynamicUi`.
  *
- * Conventions (documented for prompts; not enforced):
- * - `data-ws-handler` on interactive controls → `input`/`change` (form controls) or `click` (others);
- *   payload includes full field `state` (see platform contract in orchestration).
+ * Contract (prompt / platform text):
+ * - `data-ws-handler` on interactive elements → see orchestration `DYNAMIC_UI_INPUT_PLATFORM_CONTRACT`.
  * - `data-wdui-path` / `name` on inputs → snapshots + widget sync.
  * - Output: `data-ws-bind` / `data-ws-bind-src` / `data-ws-bind-href`.
  */
@@ -12,34 +12,14 @@
   "use strict";
 
   /**
-   * @param {unknown} handlers
-   * @returns {string[]}
-   */
-  function normalizeHandlers(handlers) {
-    if (!Array.isArray(handlers)) return [];
-    return handlers.map((h) => String(h).trim()).filter(Boolean);
-  }
-
-  /**
    * @param {string} committed
-   * @returns {{ mode: "empty" } | { mode: "html", html: string, handlers: string[] }}
+   * @returns {{ mode: "empty" } | { mode: "html", html: string }}
    */
   function parseCommitted(committed) {
     const t = String(committed ?? "").trim();
     if (!t) return { mode: "empty" };
-    if (t.startsWith("{")) {
-      try {
-        const o = JSON.parse(t);
-        if (o && typeof o === "object" && o.kind === "workshop-dynamic-ui" && typeof o.html === "string") {
-          return { mode: "html", html: o.html, handlers: normalizeHandlers(o.handlers) };
-        }
-      } catch (_) {
-        /* ignore */
-      }
-      return { mode: "empty" };
-    }
     if (/<[a-z][\s\S]*>/i.test(t) || /<\//i.test(t)) {
-      return { mode: "html", html: t, handlers: [] };
+      return { mode: "html", html: t };
     }
     return { mode: "empty" };
   }
@@ -143,7 +123,7 @@
   }
 
   /**
-   * @param {{ html?: string, handlers?: string[] }} spec
+   * @param {{ html?: string }} spec
    * @param {'input'|'output'} role
    * @param {object} options
    * @param {boolean} options.interactive
@@ -158,19 +138,11 @@
     const blockId = String(options.blockId || "");
     const data =
       options.data && typeof options.data === "object" ? /** @type {Record<string, unknown>} */ (options.data) : {};
-    const handlers = normalizeHandlers(spec.handlers);
     const schedulePatch = typeof options.schedulePatch === "function" ? options.schedulePatch : null;
     const onHandler = typeof options.onHandler === "function" ? options.onHandler : null;
 
     host.innerHTML = "";
     host.className = "dynamic-ui-stage wdui-root";
-
-    if (handlers.length) {
-      const hint = document.createElement("div");
-      hint.className = "dynamic-ui-cap wdui-handler-hint";
-      hint.textContent = `Hinweis (handlers): ${handlers.slice(0, 8).join(", ")}${handlers.length > 8 ? " …" : ""}`;
-      host.appendChild(hint);
-    }
 
     const wrap = document.createElement("div");
     wrap.className = "dynamic-ui-body wdui-html-host";
@@ -183,9 +155,6 @@
     host.appendChild(wrap);
 
     if (role === "input" && interactive && onHandler && blockId) {
-      /** @type {WeakMap<Element, number>} */
-      const rangeTimers = new WeakMap();
-
       /**
        * @param {string} handler
        * @param {HTMLElement} el
@@ -203,18 +172,6 @@
 
         if (isFormControl(node)) {
           const run = (trigger) => {
-            if (node instanceof HTMLInputElement && node.type === "range" && trigger === "input") {
-              const prev = rangeTimers.get(node);
-              if (prev) window.clearTimeout(prev);
-              rangeTimers.set(
-                node,
-                window.setTimeout(() => {
-                  rangeTimers.delete(node);
-                  fire(handler, node, "input");
-                }, 140),
-              );
-              return;
-            }
             fire(handler, node, trigger);
           };
           node.addEventListener("input", () => run("input"));

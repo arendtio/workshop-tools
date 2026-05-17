@@ -17,7 +17,7 @@ const INPUT_TYPES = [
     id: "dynamic-ui",
     code: "UI",
     title: "UI (prompt)",
-    desc: "HTML or JSON (`html` field) — wire `data-ws-handler` / `data-wdui-path` for runs",
+    desc: "HTML markup — wire `data-ws-handler` / `data-wdui-path` for runs",
     live: false,
   },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
@@ -411,10 +411,10 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "Rohes HTML oder JSON mit `html`. Das Modell erhält automatisch einen **Plattform-Vertrag** (Orchestrator + Bootstrap): `data-wdui-path`/`name` für Werte, `data-ws-handler` für Events — bei Bedienung wird ein JSON-Ereignis **inkl. vollständigem Feld-Snapshot `detail.state`** an Realtime gesendet (Sliders: `input`/`change`).",
+      "Teilnehmer committed **HTML** (kein JSON-Wrapper). Plattform-Vertrag in Instructions + Bootstrap: `data-wdui-path`/`name`, `data-ws-handler`; Events inkl. `detail.state` (voller Snapshot).",
     defaults: {
       uiPrompt:
-        '{"kind":"workshop-dynamic-ui","html":"<p>Demo</p><label>Note <input data-wdui-path=\\"note\\" /></label><button type=\\"button\\" data-ws-handler=\\"save\\">OK</button>","handlers":["save"]}',
+        '<p>Demo</p><label>Note <input data-wdui-path="note" /></label><button type="button" data-ws-handler="save">OK</button>',
     },
     fields: [
       {
@@ -422,7 +422,7 @@ const FORM_SCHEMA = {
         label: "",
         type: "hint",
         hint:
-          "Der kurze Entwurf des Teilnehmers reicht oft nur als Idee. System-Instruktionen ergänzen für das Modell, wie Handler und Snapshots funktionieren — siehe auch den fest eingebundenen Vertrag in den Realtime-Instructions / Bootstrap.",
+          "Der Entwurf oben ist nur die Idee; committed wird reines HTML. Das Modell erhält automatisch den festen Workshop-Vertrag (Handler + Snapshots).",
       },
     ],
   },
@@ -434,10 +434,9 @@ const FORM_SCHEMA = {
   },
   "output:dynamic-ui": {
     apiMapping:
-      "Realtime `workshop_emit_dynamic_ui`: `ui_spec` / committed HTML, `ui_data` beliebiges JSON — Bindings z. B. `data-ws-bind=\"title\"`, `data-ws-bind-src` für Bilder. Session: widgets + `outputData`.",
+      "Realtime `workshop_emit_dynamic_ui`: committed **HTML**; `ui_spec` oft `{ \"html\": \"...\" }` vom Modell; `ui_data` beliebig — Bindings `data-ws-bind*`. Session: widgets + `outputData`.",
     defaults: {
-      uiPrompt:
-        '{"kind":"workshop-dynamic-ui","html":"<h3 data-ws-bind=\\"title\\"></h3><p data-ws-bind=\\"body\\"></p>"}',
+      uiPrompt: '<h3 data-ws-bind="title"></h3><p data-ws-bind="body"></p>',
     },
     fields: [],
   },
@@ -1201,7 +1200,7 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
 }
 
 /**
- * After server bootstrap items, send one structured JSON snapshot per input dynamic-ui HTML/JSON spec.
+ * After server bootstrap items, send one structured JSON snapshot per input dynamic-ui HTML markup.
  * @param {RTCDataChannel} dc
  */
 function sendDynamicUiSpecInitialFieldSnapshots(dc) {
@@ -2473,7 +2472,7 @@ function gatherConversationSnapshotForTextOutput() {
         const W = typeof globalThis !== "undefined" ? globalThis.workshopDynamicUi : null;
         const parsed = W ? W.parseCommitted(staged) : { mode: "empty" };
         if (parsed.mode === "html") {
-          body = `Dynamic UI (HTML / JSON), ${staged.length} Zeichen committed. Draft: ${draft || "(empty)"}`;
+          body = `Dynamic UI (HTML), ${staged.length} Zeichen committed. Draft: ${draft || "(empty)"}`;
         } else {
           body =
             draft || staged
@@ -3036,7 +3035,7 @@ function renderDynamicUiEmpty(host, message) {
   empty.className = "dynamic-ui-placeholder";
   empty.textContent =
     message ||
-    "Rohes HTML oder JSON mit kind „workshop-dynamic-ui“ und Feld „html“ einfügen, dann „Erzeugen / neu erzeugen“.";
+    "Rohes HTML einfügen (Tags), dann „Erzeugen / neu erzeugen“.";
   host.appendChild(empty);
 }
 
@@ -3052,7 +3051,7 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
   const parsedBase = W ? W.parseCommitted(committed) : { mode: "empty" };
 
   /**
-   * @returns {{ html: string, handlers: string[] } | null}
+   * @returns {{ html: string } | null}
    */
   function htmlSpecForOutput() {
     const overlay =
@@ -3060,15 +3059,14 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
         ? block._runDynamicUiSpecOverlay
         : null;
     if (overlay && typeof overlay.html === "string" && overlay.html.trim()) {
-      const h = Array.isArray(overlay.handlers) ? overlay.handlers.map((x) => String(x)) : [];
-      return { html: overlay.html.trim(), handlers: h };
+      return { html: overlay.html.trim() };
     }
     if (parsedBase.mode === "html" && parsedBase.html) {
-      return { html: parsedBase.html, handlers: parsedBase.handlers || [] };
+      return { html: parsedBase.html };
     }
     const runPrompt = String(block._runDynamicUiPrompt || "").trim();
     if (runPrompt && (/<[a-z][\s\S]*>/i.test(runPrompt) || /<\//i.test(runPrompt))) {
-      return { html: runPrompt, handlers: [] };
+      return { html: runPrompt };
     }
     return null;
   }
@@ -3093,7 +3091,7 @@ function renderDynamicUiBlock(host, block, interactive, syncWidgetsToServer) {
   }
   if (parsedBase.mode === "html" && parsedBase.html) {
     const canSync = !!(interactive && syncWidgetsToServer && workshopSessionIds?.dynamicUiSessionId);
-    W.renderInto(host, { html: parsedBase.html, handlers: parsedBase.handlers || [] }, "input", {
+    W.renderInto(host, { html: parsedBase.html }, "input", {
       interactive,
       blockId: block.id,
       schedulePatch: canSync ? (key, val) => scheduleWorkshopDynamicUiWidgetPatch(key, val) : undefined,
@@ -3522,15 +3520,15 @@ function renderDynamicUiModule(block, card) {
 
   const lbl = document.createElement("label");
   lbl.className = "dynamic-ui-prompt-label";
-  lbl.textContent = "UI-Prompt oder JSON-Spec";
+  lbl.textContent = "UI-Entwurf (HTML)";
   const ta = document.createElement("textarea");
   ta.className = "dynamic-ui-prompt-field";
   ta.rows = 4;
   ta.disabled = locked;
   ta.placeholder =
     block.role === "input"
-      ? "Rohes HTML oder JSON: {\"kind\":\"workshop-dynamic-ui\",\"html\":\"<p>…</p>\",\"handlers\":[\"save\"]}"
-      : "HTML-Ausgabe oder JSON mit \"html\"; Modell: `data-ws-bind` / `data-ws-bind-src` für ui_data.";
+      ? "Rohes HTML (mit Tags) in den Entwurf; nach „Erzeugen“ erscheint die Vorschau."
+      : "HTML-Ausgabe-Vorlage; Modell: `data-ws-bind` / `data-ws-bind-src` für ui_data.";
 
   ta.value = String(block.values.uiPrompt ?? "");
   ta.addEventListener("input", () => {
@@ -3554,8 +3552,8 @@ function renderDynamicUiModule(block, card) {
     block.dynamicUiCommitted = txt;
     renderAll();
     const looksHtml =
-      txt.startsWith("{") || /<[a-z][\s\S]*>/i.test(txt) || /<\//i.test(txt);
-    showToast(looksHtml ? "Vorschau aktualisiert (HTML / JSON)." : "Kein erkennbares HTML — bitte Tags oder JSON mit html-Feld.");
+      txt.startsWith("<") || /<[a-z][\s\S]*>/i.test(txt) || /<\//i.test(txt);
+    showToast(looksHtml ? "HTML übernommen — Vorschau aktualisiert." : "Kein erkennbares HTML (Tags fehlen) — trotzdem übernommen.");
   });
 
   btns.appendChild(gen);
@@ -3568,7 +3566,7 @@ function renderDynamicUiModule(block, card) {
   if (block.role === "output" && (block._runDynamicUiPrompt || block._runDynamicUiSpecOverlay || block._runDynamicUiData)) {
     prevTitle.textContent = hasHtml
       ? "Gerenderte Oberfläche — Laufzeit / Modell"
-      : "Gerenderte Oberfläche — warte auf HTML / JSON";
+      : "Gerenderte Oberfläche — warte auf HTML";
   } else {
     prevTitle.textContent = hasHtml ? "Gerenderte Oberfläche" : "Gerenderte Oberfläche — noch leer";
   }

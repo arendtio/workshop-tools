@@ -64,8 +64,8 @@ export function buildWorkshopEmitDynamicUiTool() {
     type: "function",
     name: "workshop_emit_dynamic_ui",
     description:
-      "Update workshop **output:dynamic-ui** card(s). Supply any of: `ui_prompt` (HTML snippet or hint text), " +
-      "`ui_spec` (object, typically includes `html` string and optional `handlers` metadata), " +
+      "Update workshop **output:dynamic-ui** card(s). Supply any of: `ui_prompt` (HTML/text), " +
+      "`ui_spec` (object with an `html` string from the model), " +
       "`ui_data` (arbitrary JSON merged into the preview — bind with `data-ws-bind` / `data-ws-bind-src` in the HTML).",
     parameters: {
       type: "object",
@@ -76,7 +76,7 @@ export function buildWorkshopEmitDynamicUiTool() {
         },
         ui_spec: {
           type: "object",
-          description: "Optional overlay (e.g. `{ html: \"...\", handlers: [\"save\"] }`) applied to output dynamic-ui blocks.",
+          description: "Optional overlay; must include `html` string for the client to render.",
         },
         ui_data: {
           type: "object",

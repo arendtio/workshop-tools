@@ -27,23 +27,23 @@ const TOOLING_DOMAIN_LABEL = {
 
 /** Appended to model context whenever an `input:dynamic-ui` block exists (also appended to that block’s bootstrap item). */
 export const DYNAMIC_UI_INPUT_PLATFORM_CONTRACT =
-  "## Workshop: input module `dynamic-ui` (HTML or JSON with an `html` string)\n\n" +
-  "The participant **draft** only states what they want (e.g. three sliders for quality, time, budget). " +
-  "Markup you produce must still satisfy the **platform wiring** below so follow-up reasoning and tools get structured signals.\n\n" +
+  "## Workshop: input module `dynamic-ui` (participant **committed markup is HTML**)\n\n" +
+  "The participant **draft** only states what they want (e.g. sliders for quality, time, budget). " +
+  "You must return **HTML** for that card that follows the wiring below so follow-up steps get structured signals.\n\n" +
   "### Field capture\n" +
   "- On every value control add `data-wdui-path=\"<key>\"` **or** a unique HTML `name`. " +
   "Those values are merged into JSON snapshots, `workshop_dynamic_ui_read_state`, and the debounced widget patch for this run.\n\n" +
   "### Handler events → model (follow-up)\n" +
   "- On **interactive** elements add `data-ws-handler=\"<handlerId>\"` (any non-empty id).\n" +
-  "- **Form controls** (`input`, `textarea`, `select`, including `type=\"range\"`): the host emits on **`input` and `change`**.\n" +
+  "- **Form controls** (`input`, `textarea`, `select`): the host emits on **`input` and `change`** (native browser rate — no host-side throttling).\n" +
   "- **Other elements** (e.g. `button`, `a`): the host emits on **`click`**.\n" +
   "- Each emission is a user text item whose JSON body includes `workshop: \"dynamic-ui-handler-v1\"`, `blockId`, `handler`, and `detail`: " +
-  "`{ tag, trigger, state }` where **`state` is a flat string map of all current field values in this UI** (generic full snapshot, not only the control that fired). " +
-  "Downstream logic can read the latest values from `detail.state` without custom per-widget plumbing.\n\n" +
-  "Example range slider:\n" +
-  "`<input type=\"range\" min=\"0\" max=\"100\" data-wdui-path=\"quality\" data-ws-handler=\"qualityMoved\" />`\n\n" +
-  "The optional JSON `handlers` array is **documentation for humans only**; the runtime does not filter handler names.\n\n" +
-  "**Kurz (DE):** Der Entwurf des Teilnehmers beschreibt nur die UI-Idee. Sie müssen `data-wdui-path`/`name` setzen und bei Bedarf `data-ws-handler`, damit bei Interaktion ein Ereignis **inkl. kompletter Feld-Snapshot (`detail.state`)** an das Modell geht.\n";
+  "`{ tag, trigger, state }` where **`state` is a flat string map of all current field values in this UI** (generic full snapshot). " +
+  "If you need lower event volume, choose events and controls accordingly (e.g. rely on `change` vs `input`, or explicit submit buttons).\n\n" +
+  "Minimal example:\n" +
+  "`<label>Title <input data-wdui-path=\"title\" /></label> <button type=\"button\" data-ws-handler=\"save\">Save</button>`\n\n" +
+  "**Kurz (DE):** Teilnehmer-Entwurf = Idee; auslieferbares **HTML** mit `data-wdui-path`/`name` und bei Bedarf `data-ws-handler`; Ereignisse enthalten **`detail.state`** (kompletter Feld-Snapshot). " +
+  "Viele Events hintereinander vermeidet ihr durch sinnvolle Wahl der Elemente/Events im HTML — die Plattform drosselt nicht.\n";
 
 /**
  * @param {{ blocks: { role: string, typeId: string }[] }} plan
@@ -147,7 +147,7 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "form")
       return "- Output: structured form — call `workshop_emit_form_values` with `{ fields: [{ label, value }] }` when you have final values to show.";
     if (b.typeId === "dynamic-ui")
-      return "- Output: dynamic UI — call `workshop_emit_dynamic_ui` with `ui_prompt` (HTML/text), `ui_spec` (e.g. `html` string), and/or `ui_data` (JSON for `data-ws-bind` fields in the markup).";
+      return "- Output: dynamic UI — participant commits **HTML**; call `workshop_emit_dynamic_ui` with `ui_prompt` and/or `ui_spec` (`html` string) and/or `ui_data` for `data-ws-bind*` fields.";
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
@@ -268,17 +268,14 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     if (b.typeId === "dynamic-ui") {
       const draft = String(b.values?.uiPrompt ?? "").trim();
       const staged = String(b.dynamicUiCommitted ?? "").trim();
-      const looksHtmlSpec =
-        staged.startsWith("{") ||
-        (staged.includes('"kind"') && staged.includes("workshop-dynamic-ui")) ||
-        /<[a-z][\s\S]*>/i.test(staged);
+      const hasCommittedHtml = /<[a-z][\s\S]*>/i.test(staged) || /<\//i.test(staged);
       const body =
         draft || staged
-          ? `${draft ? `Draft:\n${draft}\n\n` : ""}${staged ? (looksHtmlSpec ? `Committed HTML / JSON UI:\n${staged}` : `Committed text:\n${staged}`) : ""}`.trim()
+          ? `${draft ? `Draft:\n${draft}\n\n` : ""}${staged ? (hasCommittedHtml ? `Committed HTML:\n${staged}` : `Committed text (no HTML tags — model should replace with HTML):\n${staged}`) : ""}`.trim()
           : "(empty)";
       events.push(
         conversationUserText(
-          `${label} — dynamic UI\n${body}${looksHtmlSpec ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for HTML inputs with data-wdui-path / name.)" : ""}\n\n${DYNAMIC_UI_INPUT_PLATFORM_CONTRACT}`,
+          `${label} — dynamic UI\n${body}${hasCommittedHtml ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for inputs with data-wdui-path / name.)" : ""}\n\n${DYNAMIC_UI_INPUT_PLATFORM_CONTRACT}`,
         ),
       );
       continue;
