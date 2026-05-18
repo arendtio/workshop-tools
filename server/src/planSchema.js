@@ -14,6 +14,8 @@ export const pipelineBlockSchema = z.object({
   values: z.record(z.string()).default({}),
   formItems: z.array(formItemSchema).optional(),
   dynamicUiCommitted: z.string().optional(),
+  /** JSON Schema (object) for output:dynamic-ui — emitted ui_data shape for processing. */
+  dynamicUiOutputSchema: z.record(z.unknown()).optional(),
   runPreview: z.string().optional(),
 });
 

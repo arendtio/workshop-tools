@@ -27,9 +27,10 @@ const TOOLING_DOMAIN_LABEL = {
 
 /** Appended to model context whenever an `input:dynamic-ui` block exists (also appended to that block’s bootstrap item). */
 export const DYNAMIC_UI_INPUT_PLATFORM_CONTRACT =
-  "## Workshop: input module `dynamic-ui` (participant **committed markup is HTML**)\n\n" +
-  "The participant **draft** only states what they want (e.g. sliders for quality, time, budget). " +
-  "You must return **HTML** for that card that follows the wiring below so follow-up steps get structured signals.\n\n" +
+  "## Workshop: input module `dynamic-ui` (natural-language design → committed HTML)\n\n" +
+  "The participant describes the UI in **plain language** (e.g. three sliders 0–100 with labels). " +
+  "The workshop generates **committed HTML** from that description before the run; you receive that markup in bootstrap. " +
+  "Do not rewrite the HTML unless the participant explicitly asks — use the wiring below to interpret **handler events** and field snapshots.\n\n" +
   "### Field capture\n" +
   "- On every value control add `data-wdui-path=\"<key>\"` **or** a unique HTML `name`. " +
   "Those values are merged into JSON snapshots, `workshop_dynamic_ui_read_state`, and the debounced widget patch for this run.\n\n" +
@@ -42,8 +43,38 @@ export const DYNAMIC_UI_INPUT_PLATFORM_CONTRACT =
   "If you need lower event volume, choose events and controls accordingly (e.g. rely on `change` vs `input`, or explicit submit buttons).\n\n" +
   "Minimal example:\n" +
   "`<label>Title <input data-wdui-path=\"title\" /></label> <button type=\"button\" data-ws-handler=\"save\">Save</button>`\n\n" +
-  "**Kurz (DE):** Teilnehmer-Entwurf = Idee; auslieferbares **HTML** mit `data-wdui-path`/`name` und bei Bedarf `data-ws-handler`; Ereignisse enthalten **`detail.state`** (kompletter Feld-Snapshot). " +
-  "Viele Events hintereinander vermeidet ihr durch sinnvolle Wahl der Elemente/Events im HTML — die Plattform drosselt nicht.\n";
+  "**Kurz (DE):** Teilnehmer beschreibt die UI in natürlicher Sprache; **Erzeugen** erstellt HTML mit `data-wdui-path`/`name` und optional `data-ws-handler`. " +
+  "Ereignisse enthalten **`detail.state`** (kompletter Feld-Snapshot).\n";
+
+/**
+ * @param {{ blocks: { role: string, typeId: string, id?: string, dynamicUiOutputSchema?: Record<string, unknown> }[] }} plan
+ */
+export function buildDynamicUiOutputSchemaInstructions(plan) {
+  const outs = plan.blocks.filter((b) => b.role === "output" && b.typeId === "dynamic-ui");
+  if (!outs.length) return "";
+  const lines = [
+    "## Workshop: output module `dynamic-ui` (JSON for bindings)",
+    "",
+    "Each output card has committed HTML with `data-ws-bind*` paths. " +
+      "Call `workshop_emit_dynamic_ui` with `ui_data` JSON that conforms to the schema below (one object per card when schemas differ). " +
+      "You may also pass `ui_spec: { html }` only if the participant changed the layout.",
+    "",
+  ];
+  for (const b of outs) {
+    const id = String(b.id || "").trim() || "(no id)";
+    const schema = b.dynamicUiOutputSchema;
+    if (schema && typeof schema === "object") {
+      lines.push(`### Block \`${id}\` — required \`ui_data\` shape`, "```json", JSON.stringify(schema, null, 2), "```", "");
+    } else {
+      lines.push(
+        `### Block \`${id}\``,
+        "(No JSON Schema stored — infer bind paths from committed HTML or ask the participant to click **Erzeugen** on the output UI card.)",
+        "",
+      );
+    }
+  }
+  return lines.join("\n").trim();
+}
 
 /**
  * @param {{ blocks: { role: string, typeId: string }[] }} plan
@@ -125,6 +156,8 @@ export function buildFullRealtimeInstructions(plan) {
   const liveImage = liveAudioImageOutputGuidance(plan);
   if (liveImage) parts.push(liveImage);
   if (planHasInputDynamicUi(plan)) parts.push(DYNAMIC_UI_INPUT_PLATFORM_CONTRACT);
+  const outSchema = buildDynamicUiOutputSchemaInstructions(plan);
+  if (outSchema) parts.push(outSchema);
 
   const merged = parts.join("\n\n").trim();
   return merged || "You are a helpful workshop assistant.";
@@ -147,7 +180,7 @@ function describeConfiguredOutputs(plan) {
     if (b.typeId === "form")
       return "- Output: structured form — call `workshop_emit_form_values` with `{ fields: [{ label, value }] }` when you have final values to show.";
     if (b.typeId === "dynamic-ui")
-      return "- Output: dynamic UI — participant commits **HTML**; call `workshop_emit_dynamic_ui` with `ui_prompt` and/or `ui_spec` (`html` string) and/or `ui_data` for `data-ws-bind*` fields.";
+      return "- Output: dynamic UI — NL design → committed HTML + JSON Schema; call `workshop_emit_dynamic_ui` with `ui_data` matching the schema (and optional `ui_spec` if layout changes).";
     return `- Output module: ${b.typeId}`;
   });
   return ["Configured workshop outputs (shape expectations):", ...lines].join("\n");
@@ -266,18 +299,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     }
 
     if (b.typeId === "dynamic-ui") {
-      const draft = String(b.values?.uiPrompt ?? "").trim();
-      const staged = String(b.dynamicUiCommitted ?? "").trim();
-      const hasCommittedHtml = /<[a-z][\s\S]*>/i.test(staged) || /<\//i.test(staged);
-      const body =
-        draft || staged
-          ? `${draft ? `Draft:\n${draft}\n\n` : ""}${staged ? (hasCommittedHtml ? `Committed HTML:\n${staged}` : `Committed text (no HTML tags — model should replace with HTML):\n${staged}`) : ""}`.trim()
-          : "(empty)";
-      events.push(
-        conversationUserText(
-          `${label} — dynamic UI\n${body}${hasCommittedHtml ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for inputs with data-wdui-path / name.)" : ""}\n\n${DYNAMIC_UI_INPUT_PLATFORM_CONTRACT}`,
-        ),
-      );
+      events.push(conversationUserText(buildDynamicUiBootstrapText(b, label)));
       continue;
     }
 
@@ -293,7 +315,41 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     );
   }
 
+  const outputs = plan.blocks.filter((b) => b.role === "output" && b.typeId === "dynamic-ui");
+  for (const b of outputs) {
+    const label = `Output · ${b.typeId}${b.id ? ` (${b.id})` : ""}`;
+    events.push(conversationUserText(buildDynamicUiBootstrapText(b, label)));
+  }
+
   return events;
+}
+
+/**
+ * @param {{ role: string, typeId: string, values?: Record<string, string>, dynamicUiCommitted?: string, dynamicUiOutputSchema?: Record<string, unknown> }} b
+ * @param {string} label
+ */
+function buildDynamicUiBootstrapText(b, label) {
+  const draft = String(b.values?.uiPrompt ?? "").trim();
+  const staged = String(b.dynamicUiCommitted ?? "").trim();
+  const hasCommittedHtml = /<[a-z][\s\S]*>/i.test(staged) || /<\//i.test(staged);
+  const isOut = b.role === "output";
+  /** @type {string[]} */
+  const chunks = [];
+  if (draft) chunks.push(`Natural-language design:\n${draft}`);
+  if (staged) {
+    chunks.push(hasCommittedHtml ? `Committed HTML:\n${staged}` : `Committed (no HTML yet):\n${staged}`);
+  }
+  if (isOut && b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object") {
+    chunks.push(`ui_data JSON Schema:\n${JSON.stringify(b.dynamicUiOutputSchema, null, 2)}`);
+  }
+  const body = chunks.length ? chunks.join("\n\n") : "(empty — participant should describe the UI and click Erzeugen)";
+  const tail = isOut
+    ? "\n\nEmit results with `workshop_emit_dynamic_ui` and `ui_data` conforming to the schema above."
+    : hasCommittedHtml
+      ? "\n\n(After WebRTC connects, the host may send an initial field-value JSON snapshot for inputs with data-wdui-path / name.)"
+      : "\n\n(No committed HTML yet — ask the participant to click Erzeugen on the input UI card.)";
+  const contract = isOut ? "" : `\n\n${DYNAMIC_UI_INPUT_PLATFORM_CONTRACT}`;
+  return `${label} — dynamic UI\n${body}${tail}${contract}`;
 }
 
 /**

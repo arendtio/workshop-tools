@@ -17,7 +17,7 @@ const INPUT_TYPES = [
     id: "dynamic-ui",
     code: "UI",
     title: "UI (prompt)",
-    desc: "HTML markup — wire `data-ws-handler` / `data-wdui-path` for runs",
+    desc: "Describe the UI in plain language — Erzeugen builds HTML + handler wiring",
     live: false,
   },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
@@ -51,7 +51,7 @@ const OUTPUT_TYPES = [
     id: "dynamic-ui",
     code: "UI",
     title: "UI (prompt)",
-    desc: "HTML output + optional `ui_data` JSON — `data-ws-bind*` in markup",
+    desc: "NL design → HTML + JSON Schema; processing fills `ui_data` at run time",
     live: false,
   },
   { id: "audio", code: "AUD", title: "Audio", desc: "Speech or sound file", live: false },
@@ -411,10 +411,10 @@ const FORM_SCHEMA = {
   },
   "input:dynamic-ui": {
     apiMapping:
-      "Teilnehmer committed **HTML** (kein JSON-Wrapper). Plattform-Vertrag in Instructions + Bootstrap: `data-wdui-path`/`name`, `data-ws-handler`; Events inkl. `detail.state` (voller Snapshot).",
+      "Teilnehmer beschreibt die UI in natürlicher Sprache; **Erzeugen** ruft die OpenAI-API auf und committed HTML. Laufzeit: `data-ws-handler` → Events mit `detail.state` (Feld-Snapshot) an Processing.",
     defaults: {
       uiPrompt:
-        '<p>Demo</p><label>Note <input data-wdui-path="note" /></label><button type="button" data-ws-handler="save">OK</button>',
+        "Drei Slider von 0 bis 100 % mit den Beschriftungen Qualität, Zeit und Budget. Ein Button „Weiter“ sendet die Werte.",
     },
     fields: [
       {
@@ -422,7 +422,7 @@ const FORM_SCHEMA = {
         label: "",
         type: "hint",
         hint:
-          "Der Entwurf oben ist nur die Idee; committed wird reines HTML. Das Modell erhält automatisch den festen Workshop-Vertrag (Handler + Snapshots).",
+          "Beschreibung in Alltagssprache eingeben, dann **Erzeugen** — daraus entsteht HTML (inkl. CSS/JS). Während des Laufs feuern `data-ws-handler`-Elemente strukturierte Events ans Modell.",
       },
     ],
   },
@@ -434,9 +434,10 @@ const FORM_SCHEMA = {
   },
   "output:dynamic-ui": {
     apiMapping:
-      "Realtime `workshop_emit_dynamic_ui`: committed **HTML**; `ui_spec` oft `{ \"html\": \"...\" }` vom Modell; `ui_data` beliebig — Bindings `data-ws-bind*`. Session: widgets + `outputData`.",
+      "NL → **Erzeugen** erzeugt HTML + JSON-Schema für `ui_data`. Processing: `workshop_emit_dynamic_ui` mit JSON gemäß Schema; Bindings `data-ws-bind*`.",
     defaults: {
-      uiPrompt: '<h3 data-ws-bind="title"></h3><p data-ws-bind="body"></p>',
+      uiPrompt:
+        "Eine Überschrift mit dem Titel der Antwort und darunter ein Absatz mit der Zusammenfassung.",
     },
     fields: [],
   },
@@ -576,6 +577,10 @@ function serializePipelinePlan() {
       values: { ...(b.values || {}) },
       formItems: Array.isArray(b.formItems) ? b.formItems.map((it) => ({ ...it })) : undefined,
       dynamicUiCommitted: b.dynamicUiCommitted,
+      dynamicUiOutputSchema:
+        b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object"
+          ? { ...b.dynamicUiOutputSchema }
+          : undefined,
     })),
   };
   if (workshopSessionIds?.toolingMockSessionId) {
@@ -1503,6 +1508,7 @@ function createBlock(role, typeId) {
   }
   if (typeId === "dynamic-ui") {
     block.dynamicUiCommitted = "";
+    if (role === "output") block.dynamicUiOutputSchema = null;
   }
   return block;
 }
@@ -1777,6 +1783,9 @@ function serializePipelineSnapshot(blocks) {
     const row = { role: b.role, typeId: b.typeId, values: { ...(b.values || {}) } };
     if (Array.isArray(b.formItems)) row.formItems = JSON.parse(JSON.stringify(b.formItems));
     if (b.dynamicUiCommitted != null) row.dynamicUiCommitted = String(b.dynamicUiCommitted);
+    if (b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object") {
+      row.dynamicUiOutputSchema = JSON.parse(JSON.stringify(b.dynamicUiOutputSchema));
+    }
     return row;
   });
 }
@@ -1805,6 +1814,9 @@ function restorePipelineFromSnapshot(rows) {
     }
     if (row.dynamicUiCommitted != null) {
       block.dynamicUiCommitted = String(row.dynamicUiCommitted);
+    }
+    if (row.dynamicUiOutputSchema && typeof row.dynamicUiOutputSchema === "object") {
+      block.dynamicUiOutputSchema = JSON.parse(JSON.stringify(row.dynamicUiOutputSchema));
     }
     state.blocks.push(block);
   }
@@ -3035,7 +3047,7 @@ function renderDynamicUiEmpty(host, message) {
   empty.className = "dynamic-ui-placeholder";
   empty.textContent =
     message ||
-    "Rohes HTML einfügen (Tags), dann „Erzeugen / neu erzeugen“.";
+    "Beschreibung eingeben und „Erzeugen“ klicken — dann erscheint die Vorschau.";
   host.appendChild(empty);
 }
 
@@ -3520,15 +3532,15 @@ function renderDynamicUiModule(block, card) {
 
   const lbl = document.createElement("label");
   lbl.className = "dynamic-ui-prompt-label";
-  lbl.textContent = "UI-Entwurf (HTML)";
+  lbl.textContent = "UI-Beschreibung (natürliche Sprache)";
   const ta = document.createElement("textarea");
   ta.className = "dynamic-ui-prompt-field";
   ta.rows = 4;
   ta.disabled = locked;
   ta.placeholder =
     block.role === "input"
-      ? "Rohes HTML (mit Tags) in den Entwurf; nach „Erzeugen“ erscheint die Vorschau."
-      : "HTML-Ausgabe-Vorlage; Modell: `data-ws-bind` / `data-ws-bind-src` für ui_data.";
+      ? "z. B. drei Slider von 0–100 % mit Beschriftungen …"
+      : "z. B. Überschrift und Absatz für die Modell-Antwort …";
 
   ta.value = String(block.values.uiPrompt ?? "");
   ta.addEventListener("input", () => {
@@ -3544,16 +3556,48 @@ function renderDynamicUiModule(block, card) {
   gen.textContent = "Erzeugen / neu erzeugen";
   gen.disabled = locked;
   gen.addEventListener("click", () => {
-    const txt = String(block.values.uiPrompt || "").trim();
-    if (!txt) {
-      showToast("Inhalt ist leer.");
-      return;
-    }
-    block.dynamicUiCommitted = txt;
-    renderAll();
-    const looksHtml =
-      txt.startsWith("<") || /<[a-z][\s\S]*>/i.test(txt) || /<\//i.test(txt);
-    showToast(looksHtml ? "HTML übernommen — Vorschau aktualisiert." : "Kein erkennbares HTML (Tags fehlen) — trotzdem übernommen.");
+    void (async () => {
+      const txt = String(block.values.uiPrompt || "").trim();
+      if (!txt) {
+        showToast("Beschreibung ist leer.");
+        return;
+      }
+      const prevLabel = gen.textContent;
+      gen.disabled = true;
+      ta.disabled = true;
+      gen.textContent = "Erzeuge …";
+      try {
+        const res = await fetch("/api/dynamic-ui/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: txt, role: block.role }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok || !data.html) {
+          const detail = data.message || data.error || res.statusText || "Anfrage fehlgeschlagen";
+          showToast(`Erzeugen: ${String(detail).slice(0, 160)}`);
+          return;
+        }
+        block.dynamicUiCommitted = String(data.html);
+        if (block.role === "output" && data.output_schema && typeof data.output_schema === "object") {
+          block.dynamicUiOutputSchema = data.output_schema;
+        } else if (block.role === "output") {
+          block.dynamicUiOutputSchema = null;
+        }
+        renderAll();
+        showToast(
+          block.role === "output" && block.dynamicUiOutputSchema
+            ? "HTML und JSON-Schema erzeugt — Vorschau aktualisiert."
+            : "HTML erzeugt — Vorschau aktualisiert.",
+        );
+      } catch (e) {
+        showToast(`Erzeugen: ${String(e && e.message ? e.message : e).slice(0, 160)}`);
+      } finally {
+        gen.disabled = locked;
+        ta.disabled = locked;
+        gen.textContent = prevLabel;
+      }
+    })();
   });
 
   btns.appendChild(gen);
@@ -3584,6 +3628,17 @@ function renderDynamicUiModule(block, card) {
   body.appendChild(btns);
   body.appendChild(prevTitle);
   body.appendChild(host);
+
+  if (block.role === "output" && block.dynamicUiOutputSchema && typeof block.dynamicUiOutputSchema === "object") {
+    const schemaTitle = document.createElement("div");
+    schemaTitle.className = "composer-form-subtitle";
+    schemaTitle.textContent = "JSON-Schema (für Processing / ui_data)";
+    const schemaPre = document.createElement("pre");
+    schemaPre.className = "dynamic-ui-schema-preview";
+    schemaPre.textContent = JSON.stringify(block.dynamicUiOutputSchema, null, 2);
+    body.appendChild(schemaTitle);
+    body.appendChild(schemaPre);
+  }
 
   card.appendChild(body);
 }
@@ -3703,6 +3758,7 @@ function renderAudioLivePttBar(block, card) {
   wrap.appendChild(btn);
   card.appendChild(wrap);
 }
+
 
 function renderModuleCard(block, container) {
   const def = findDef(block.role, block.typeId);

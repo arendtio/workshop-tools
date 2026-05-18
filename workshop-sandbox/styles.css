@@ -1762,6 +1762,19 @@ footer.status-bar {
   font-size: 0.74rem;
 }
 
+.dynamic-ui-schema-preview {
+  margin: 0.35rem 0 0;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-subtle);
+  background: #f8fafc;
+  color: var(--text-muted);
+  overflow-x: auto;
+  max-height: 10rem;
+}
+
 /* ── Dynamic UI: freeform HTML host ── */
 
 .wdui-root .wdui-html-host {

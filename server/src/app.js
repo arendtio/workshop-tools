@@ -6,6 +6,7 @@ import { buildRealtimeBootstrapClientEvents } from "./orchestrateRealtime.js";
 import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./realtimeSession.js";
 import { generateWorkshopImageFromPlan } from "./imageGeneration.js";
 import { generateWorkshopSpeechFromPlan } from "./speechGeneration.js";
+import { generateDynamicUiFromPrompt } from "./dynamicUiGeneration.js";
 import { createMockToolingSession, hasMockToolingSession, runMockToolingCall } from "./mockToolingStore.js";
 import {
   createDynamicUiSession,
@@ -191,6 +192,38 @@ export function createApp(opts) {
     }
     const out = runMockToolingCall(sessionId, call);
     return res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.post("/api/dynamic-ui/generate", async (req, res) => {
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({
+        ok: false,
+        error: "NO_API_KEY",
+        message: "Server is missing OPENAI_API_KEY.",
+      });
+    }
+    const prompt = req.body?.prompt ?? req.body?.ui_prompt;
+    const role = req.body?.role ?? "input";
+    try {
+      const out = await generateDynamicUiFromPrompt(String(role), String(prompt ?? ""));
+      return res.json({
+        ok: true,
+        html: out.html,
+        output_schema: out.output_schema ?? null,
+      });
+    } catch (e) {
+      const code = /** @type {{ code?: string }} */ (e).code;
+      if (code === "EMPTY_PROMPT" || code === "INVALID_ROLE") {
+        return res.status(400).json({ ok: false, error: code, message: e.message });
+      }
+      const st = typeof e.status === "number" ? e.status : NaN;
+      const status = st >= 400 && st < 600 ? st : 502;
+      return res.status(status).json({
+        ok: false,
+        error: code || "OPENAI_DYNAMIC_UI",
+        message: e.message || "Dynamic UI generation failed.",
+      });
+    }
   });
 
   app.post("/api/workshop-session/dynamic-ui", (req, res) => {

@@ -64,9 +64,9 @@ export function buildWorkshopEmitDynamicUiTool() {
     type: "function",
     name: "workshop_emit_dynamic_ui",
     description:
-      "Update workshop **output:dynamic-ui** card(s). Supply any of: `ui_prompt` (HTML/text), " +
-      "`ui_spec` (object with an `html` string from the model), " +
-      "`ui_data` (arbitrary JSON merged into the preview — bind with `data-ws-bind` / `data-ws-bind-src` in the HTML).",
+      "Update workshop **output:dynamic-ui** card(s). Primary payload: `ui_data` JSON matching the JSON Schema " +
+      "from the participant's Erzeugen step (see session instructions). Optional: `ui_spec` (`html` overlay) if layout changes. " +
+      "`ui_prompt` is legacy text only — prefer `ui_data`.",
     parameters: {
       type: "object",
       properties: {

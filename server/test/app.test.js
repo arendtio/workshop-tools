@@ -269,6 +269,28 @@ describe("HTTP API", () => {
     expect(r.body.state.widgets["slider:A"]).toBe("12");
   });
 
+  it("POST /api/dynamic-ui/generate returns html from OpenAI", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ html: "<p>x</p>" }) } }],
+          }),
+      })),
+    );
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/dynamic-ui/generate")
+      .send({ prompt: "a paragraph", role: "input" });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.html).toBe("<p>x</p>");
+  });
+
   it("POST /api/workshop-session/dynamic-ui merges outputData", async () => {
     const sid = createDynamicUiSession();
     const app = createApp({ staticRoot });

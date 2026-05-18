@@ -133,7 +133,33 @@ describe("orchestrateRealtime", () => {
     });
     expect(events).toHaveLength(1);
     const t = events[0].item.content[0].text;
-    expect(t).toContain("Draft:");
+    expect(t).toContain("Natural-language design:");
     expect(t).toContain("data-ws-handler");
+  });
+
+  it("includes output dynamic-ui schema in instructions and bootstrap", () => {
+    const schema = { type: "object", properties: { title: { type: "string" } } };
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        { id: "out1", role: "output", typeId: "dynamic-ui", values: {}, dynamicUiOutputSchema: schema },
+      ],
+    });
+    expect(text).toContain("required `ui_data` shape");
+    expect(text).toContain('"title"');
+
+    const events = buildRealtimeBootstrapClientEvents({
+      blocks: [
+        {
+          id: "out1",
+          role: "output",
+          typeId: "dynamic-ui",
+          values: { uiPrompt: "show a title" },
+          dynamicUiCommitted: '<h3 data-ws-bind="title"></h3>',
+          dynamicUiOutputSchema: schema,
+        },
+      ],
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].item.content[0].text).toContain("workshop_emit_dynamic_ui");
   });
 });

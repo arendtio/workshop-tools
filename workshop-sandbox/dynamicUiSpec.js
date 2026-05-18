@@ -1,12 +1,12 @@
 /**
- * Workshop dynamic UI — participant markup is **HTML only** (innerHTML).
- * Tooling may still send `{ html: "..." }` overlays; this file only parses **committed** strings as HTML.
+ * Workshop dynamic UI — **committed** markup is HTML (generated from NL via `/api/dynamic-ui/generate`).
+ * Tooling may still send `{ html: "..." }` overlays; this file parses committed strings as HTML for preview.
  * Exposes `globalThis.workshopDynamicUi`.
  *
- * Contract (prompt / platform text):
- * - `data-ws-handler` on interactive elements → see orchestration `DYNAMIC_UI_INPUT_PLATFORM_CONTRACT`.
+ * Contract (platform text):
+ * - `data-ws-handler` on interactive elements → handler events with `detail.state`.
  * - `data-wdui-path` / `name` on inputs → snapshots + widget sync.
- * - Output: `data-ws-bind` / `data-ws-bind-src` / `data-ws-bind-href`.
+ * - Output: `data-ws-bind` / `data-ws-bind-src` / `data-ws-bind-href` + JSON Schema on the block for processing.
  */
 (function (g) {
   "use strict";
