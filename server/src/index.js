@@ -1,5 +1,8 @@
 import path from "path";
 import { createApp, resolveRepoRoot } from "./app.js";
+import { ensureOpenAiApiKeyLoaded } from "./openaiConfig.js";
+
+ensureOpenAiApiKeyLoaded();
 
 const PORT = Number(process.env.PORT || 8080);
 const repoRoot = resolveRepoRoot();

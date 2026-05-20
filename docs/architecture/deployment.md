@@ -26,7 +26,16 @@ docker build -t workshop-tools .
 docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
 ```
 
-Optional: `OPENAI_REALTIME_MODEL` (defaults to a cost-conscious Realtime model), `OPENAI_DYNAMIC_UI_MODEL` (default `gpt-5.4-mini`), `OPENAI_DYNAMIC_UI_REASONING_EFFORT` (default `low`), `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
+With Docker Compose / Swarm **secrets**, set only the file path (the server reads the file on startup):
+
+```yaml
+environment:
+  OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+secrets:
+  - openai_api_key
+```
+
+Optional: `OPENAI_REALTIME_MODEL` (defaults to a cost-conscious Realtime model), `OPENAI_DYNAMIC_UI_MODEL` (default `gpt-5.4-mini`), `OPENAI_DYNAMIC_UI_REASONING_EFFORT` (default `low`), `OPENAI_IMAGE_TOOL_QUALITY` (default `low`), `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
 
 ## Container contract (when an image exists)
 
