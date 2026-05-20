@@ -1,9 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateDynamicUiFromPrompt } from "../src/dynamicUiGeneration.js";
 
+function mockResponsesFetch(payload) {
+  return vi.fn(async (url, init) => {
+    expect(String(url)).toContain("/responses");
+    const body = JSON.parse(String(init.body));
+    expect(body.model).toBe("gpt-5.4-mini");
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(body.text?.format?.type).toBe("json_schema");
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(payload),
+    };
+  });
+}
+
 describe("generateDynamicUiFromPrompt", () => {
   afterEach(() => {
     delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_DYNAMIC_UI_MODEL;
+    delete process.env.OPENAI_DYNAMIC_UI_REASONING_EFFORT;
     vi.unstubAllGlobals();
   });
 
@@ -14,18 +31,13 @@ describe("generateDynamicUiFromPrompt", () => {
     });
   });
 
-  it("parses input HTML from chat completion", async () => {
+  it("parses input HTML from Responses API", async () => {
     process.env.OPENAI_API_KEY = "sk-test";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({
-            choices: [{ message: { content: JSON.stringify({ html: "<p>Hi</p>" }) } }],
-          }),
-      })),
+      mockResponsesFetch({
+        output_text: JSON.stringify({ html: "<p>Hi</p>" }),
+      }),
     );
 
     const out = await generateDynamicUiFromPrompt("input", "three sliders 0-100");
@@ -37,14 +49,9 @@ describe("generateDynamicUiFromPrompt", () => {
     process.env.OPENAI_API_KEY = "sk-test";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({
-            choices: [{ message: { content: JSON.stringify({ html: "<h3></h3>" }) } }],
-          }),
-      })),
+      mockResponsesFetch({
+        output_text: JSON.stringify({ html: "<h3></h3>" }),
+      }),
     );
 
     await expect(generateDynamicUiFromPrompt("output", "show title")).rejects.toMatchObject({
@@ -56,27 +63,49 @@ describe("generateDynamicUiFromPrompt", () => {
     process.env.OPENAI_API_KEY = "sk-test";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({
-            choices: [
+      mockResponsesFetch({
+        output: [
+          {
+            type: "message",
+            content: [
               {
-                message: {
-                  content: JSON.stringify({
-                    html: '<h3 data-ws-bind="title"></h3>',
-                    output_schema: { type: "object", properties: { title: { type: "string" } } },
+                type: "output_text",
+                text: JSON.stringify({
+                  html: '<h3 data-ws-bind="title"></h3>',
+                  output_schema: JSON.stringify({
+                    type: "object",
+                    properties: { title: { type: "string" } },
                   }),
-                },
+                }),
               },
             ],
-          }),
-      })),
+          },
+        ],
+      }),
     );
 
     const out = await generateDynamicUiFromPrompt("output", "title heading");
     expect(out.html).toContain("data-ws-bind");
     expect(out.output_schema).toEqual({ type: "object", properties: { title: { type: "string" } } });
+  });
+
+  it("honors OPENAI_DYNAMIC_UI_MODEL and reasoning env overrides", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_DYNAMIC_UI_MODEL = "gpt-5.5-pro";
+    process.env.OPENAI_DYNAMIC_UI_REASONING_EFFORT = "medium";
+    const fetchMock = vi.fn(async (url, init) => {
+      const body = JSON.parse(String(init.body));
+      expect(body.model).toBe("gpt-5.5-pro");
+      expect(body.reasoning).toEqual({ effort: "medium" });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ output_text: JSON.stringify({ html: "<p>x</p>" }) }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateDynamicUiFromPrompt("input", "hello");
+    expect(fetchMock).toHaveBeenCalled();
   });
 });

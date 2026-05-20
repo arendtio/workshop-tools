@@ -3,25 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Workshop Sandbox — Workbench mock-up</title>
+    <title>AI Workshop Sandbox</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="app-header">
-      <div class="header-left">
-        <div class="brand">
-          <h1>AI Workshop Sandbox</h1>
-          <p>
-            Add modules on the left; inputs, processing, and outputs show together in the center. Serve with the workshop
-            Node server (same origin) for plan validation, ephemeral Realtime keys, and WebRTC runs. Static-only hosting has
-            no <code>/api</code> routes — use <code>cd server && npm start</code> to execute a pipeline.
-          </p>
-        </div>
-        <div class="badges">
-          <span class="badge mock">Workbench</span>
-          <span class="badge">API when same-origin server</span>
-        </div>
-      </div>
+      <h1 class="app-title">AI Workshop Sandbox</h1>
       <div class="header-actions">
         <button type="button" class="ghost" id="btn-clear">Clear pipeline</button>
       </div>

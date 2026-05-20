@@ -126,6 +126,7 @@ describe("imageGeneration helpers", () => {
     expect(posted.model).toBe("gpt-5.4-mini");
     expect(posted.tools?.[0]?.type).toBe("image_generation");
     expect(posted.tools?.[0]?.model).toBe("gpt-image-2");
+    expect(posted.tools?.[0]?.quality).toBe("low");
     expect(posted.response_format).toBeUndefined();
     const userContent = posted.input?.[0]?.content;
     expect(Array.isArray(userContent)).toBe(true);

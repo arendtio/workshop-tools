@@ -40,5 +40,5 @@ docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
 ### Key Caveats
 
 - **Authentication** is intentionally omitted for now; protect the deployment at the network edge if needed.
-- **OpenAI:** the long-lived key is **`OPENAI_API_KEY`** on the server only; the browser receives a **short-lived** client secret. Optional: `OPENAI_REALTIME_MODEL`, `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
+- **OpenAI:** the long-lived key is **`OPENAI_API_KEY`** on the server only; the browser receives a **short-lived** client secret. Optional: `OPENAI_REALTIME_MODEL`, `OPENAI_DYNAMIC_UI_MODEL` (default `gpt-5.4-mini`), `OPENAI_DYNAMIC_UI_REASONING_EFFORT` (default `low`), `OPENAI_API_BASE`, `OPENAI_SAFETY_IDENTIFIER`, `PORT`.
 - Google Fonts (DM Sans) load via CDN; offline environments fall back to system-ui.

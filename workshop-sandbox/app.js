@@ -726,13 +726,9 @@ function sendRealtimeUserTextItem(dc, text) {
   );
 }
 
-/**
- * Process/output editors stay frozen during a run; **input** modules stay interactive.
- * @param {{ role: string }} block
- */
-function areModuleFieldsLockedDuringRun(block) {
-  if (!state.running) return false;
-  return block.role !== "input";
+/** Module fields stay editable during a Realtime run (only the palette is locked). */
+function areModuleFieldsLockedDuringRun(_block) {
+  return false;
 }
 
 /**
@@ -1270,7 +1266,8 @@ async function stopRealtimeRun() {
   workshopSessionIds = null;
   updateRunChrome();
   lockPalette(false);
-  renderAll();
+  renderMeta();
+  syncRunModuleChrome();
 }
 
 async function startRealtimeRun() {
@@ -1438,7 +1435,8 @@ async function startRealtimeRun() {
     state.runMode = "realtime";
     updateRunChrome();
     lockPalette(true);
-    renderAll();
+    renderMeta();
+    syncRunModuleChrome();
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -2861,7 +2859,7 @@ function startImageGenerationProgressUi() {
       b._runImageGenerating = true;
     }
   }
-  renderAll();
+  refreshImageOutputBlocks();
   imageGenProgressTimer = setInterval(syncImageGenerationProgressFill, 200);
   syncImageGenerationProgressFill();
 }
@@ -3034,6 +3032,166 @@ function parseFormOptions(optionsStr) {
     .split(/[,;|]/g)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function moduleCardEl(blockId) {
+  return document.querySelector(`[data-block-id="${CSS.escape(blockId)}"]`);
+}
+
+/**
+ * Re-render only the dynamic-ui preview host (input or output), not the whole module card.
+ * @param {HTMLElement} host
+ * @param {{ id: string, role: string, typeId: string, dynamicUiCommitted?: string, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown> }} block
+ */
+function refreshDynamicUiPreviewHost(host, block) {
+  const interactive = block.role === "input";
+  renderDynamicUiBlock(
+    host,
+    block,
+    interactive,
+    interactive && block.role === "input" && !!workshopSessionIds?.dynamicUiSessionId,
+  );
+  if (interactive && state.running) syncDynamicUiRunWidgetSync();
+}
+
+/**
+ * @param {object[]} [blocks] output dynamic-ui blocks; defaults to all in pipeline
+ */
+function refreshDynamicUiOutputBlocks(blocks) {
+  const targets =
+    blocks && blocks.length
+      ? blocks
+      : state.blocks.filter((b) => b.role === "output" && b.typeId === "dynamic-ui");
+  for (const block of targets) {
+    const card = moduleCardEl(block.id);
+    const host = card?.querySelector(".dynamic-ui-stage");
+    if (!host) continue;
+    refreshDynamicUiPreviewHost(host, block);
+    const W = globalThis.workshopDynamicUi;
+    const parsedC = W ? W.parseCommitted(String(block.dynamicUiCommitted || "")) : { mode: "empty" };
+    const hasHtml = parsedC.mode === "html";
+    const prevTitle = card.querySelector(".dynamic-ui-module .composer-form-subtitle");
+    if (prevTitle) {
+      if (block._runDynamicUiPrompt || block._runDynamicUiSpecOverlay || block._runDynamicUiData) {
+        prevTitle.textContent = hasHtml
+          ? "Gerenderte Oberfläche — Laufzeit / Modell"
+          : "Gerenderte Oberfläche — warte auf HTML";
+      } else {
+        prevTitle.textContent = hasHtml ? "Gerenderte Oberfläche" : "Gerenderte Oberfläche — noch leer";
+      }
+    }
+  }
+}
+
+function refreshImageOutputBlocks() {
+  for (const block of state.blocks.filter((b) => b.role === "output" && b.typeId === "image")) {
+    const card = moduleCardEl(block.id);
+    if (!card) continue;
+    const old = card.querySelector(".output-image-stage");
+    if (old) old.remove();
+    appendImageOutputPlaceholder(block, card);
+  }
+}
+
+function refreshAudioOutputBlocks() {
+  for (const block of state.blocks.filter((b) => b.role === "output" && b.typeId === "audio")) {
+    const card = moduleCardEl(block.id);
+    if (!card) continue;
+    const old = card.querySelector(".output-audio-stage");
+    if (old) old.remove();
+    appendSpeechOutputPlaceholder(block, card);
+  }
+}
+
+/**
+ * @param {HTMLElement} prevHost
+ * @param {{ id: string, role: string, formItems?: object[], _formRunAnswers?: Record<string, string> }} block
+ */
+function rebuildFormPreviewInShell(prevHost, block) {
+  prevHost.innerHTML = "";
+  const isOutput = block.role === "output";
+  const locked = areModuleFieldsLockedDuringRun(block);
+  const items = Array.isArray(block.formItems) ? block.formItems : [];
+  if (!items.length) {
+    const emptyP = document.createElement("p");
+    emptyP.className = "composer-form-preview-empty";
+    emptyP.textContent = "(Hier erscheinen die zusammengeklickten Widgets)";
+    prevHost.appendChild(emptyP);
+    return;
+  }
+  const formEl = document.createElement("form");
+  formEl.className = "composer-form-live";
+  formEl.noValidate = true;
+  formEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (isOutput) {
+      showToast("Ausgabe-Form ist nur Lese-Vorschau.");
+      return;
+    }
+    if (
+      state.running &&
+      state.runMode === "realtime" &&
+      realtimeDataChannel &&
+      realtimeDataChannel.readyState === "open"
+    ) {
+      const answers = collectLiveFormAnswersFromDom(formEl, block);
+      const json = JSON.stringify(answers, null, 2);
+      const def = findDef(block.role, block.typeId);
+      const title = def ? def.title : "form";
+      sendRealtimeUserTextItem(
+        realtimeDataChannel,
+        `Input · form (${title})\n\nSubmitted field values (JSON):\n${json}`,
+      );
+      showToast("Formular an Realtime gesendet.");
+      return;
+    }
+    showToast("Absenden: zuerst „Run“ starten, dann sendet das Formular an Realtime.");
+  });
+  items.forEach((it, i) =>
+    appendFormLiveControl(formEl, it, i, locked, isOutput, isOutput ? block._formRunAnswers : undefined),
+  );
+  prevHost.appendChild(formEl);
+}
+
+function refreshFormOutputPreviews() {
+  for (const block of state.blocks.filter((b) => b.role === "output" && b.typeId === "form")) {
+    const shell = moduleCardEl(block.id)?.querySelector(".composer-form-preview-shell");
+    if (shell) rebuildFormPreviewInShell(shell, block);
+  }
+}
+
+/**
+ * Replace one module card in the editor grid without re-rendering the whole pipeline.
+ * @param {{ id: string }} block
+ */
+function rerenderModuleCard(block) {
+  const old = moduleCardEl(block.id);
+  const grid = old?.parentElement;
+  if (!old || !grid || !grid.classList.contains("editor-grid")) return;
+  const anchor = old.nextSibling;
+  old.remove();
+  renderModuleCard(block, grid);
+  const fresh = moduleCardEl(block.id);
+  if (fresh && anchor) grid.insertBefore(fresh, anchor);
+}
+
+const DYNAMIC_UI_GEN_SPINNER_SVG = `<svg class="dynamic-ui-generate-spinner-svg" width="14" height="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><g class="dynamic-ui-generate-spinner-blades" fill="currentColor"><rect x="10.75" y="4" width="2.5" height="8" rx="1.25"/><rect x="10.75" y="4" width="2.5" height="8" rx="1.25" transform="rotate(120 12 12)"/><rect x="10.75" y="4" width="2.5" height="8" rx="1.25" transform="rotate(240 12 12)"/></g></svg>`;
+
+/**
+ * @param {HTMLButtonElement} gen
+ * @param {HTMLTextAreaElement} ta
+ * @param {boolean} busy
+ * @param {boolean} locked
+ */
+function setDynamicUiGenerateBusy(gen, ta, busy, locked) {
+  gen.disabled = busy || locked;
+  ta.disabled = busy || locked;
+  gen.classList.toggle("is-loading", busy);
+  gen.setAttribute("aria-busy", busy ? "true" : "false");
+  const label = gen.querySelector(".dynamic-ui-generate-label");
+  const spin = gen.querySelector(".dynamic-ui-generate-spinner");
+  if (label) label.textContent = busy ? "Erzeuge …" : "Erzeugen / neu erzeugen";
+  if (spin) spin.hidden = !busy;
 }
 
 /**
@@ -3463,47 +3621,7 @@ function renderFormComposerModule(block, card) {
 
   const prevHost = document.createElement("div");
   prevHost.className = "composer-form-preview-shell";
-
-  if (!block.formItems.length) {
-    const emptyP = document.createElement("p");
-    emptyP.className = "composer-form-preview-empty";
-    emptyP.textContent = "(Hier erscheinen die zusammengeklickten Widgets)";
-    prevHost.appendChild(emptyP);
-  } else {
-    const formEl = document.createElement("form");
-    formEl.className = "composer-form-live";
-    formEl.noValidate = true;
-    formEl.addEventListener("submit", (e) => {
-      e.preventDefault();
-      if (isOutput) {
-        showToast("Ausgabe-Form ist nur Lese-Vorschau.");
-        return;
-      }
-      if (
-        state.running &&
-        state.runMode === "realtime" &&
-        realtimeDataChannel &&
-        realtimeDataChannel.readyState === "open"
-      ) {
-        const answers = collectLiveFormAnswersFromDom(formEl, block);
-        const json = JSON.stringify(answers, null, 2);
-        const def = findDef(block.role, block.typeId);
-        const title = def ? def.title : "form";
-        sendRealtimeUserTextItem(
-          realtimeDataChannel,
-          `Input · form (${title})\n\nSubmitted field values (JSON):\n${json}`,
-        );
-        showToast("Formular an Realtime gesendet.");
-        return;
-      }
-      showToast("Absenden: zuerst „Run“ starten, dann sendet das Formular an Realtime.");
-    });
-
-    block.formItems.forEach((it, i) =>
-      appendFormLiveControl(formEl, it, i, locked, isOutput, isOutput ? block._formRunAnswers : undefined),
-    );
-    prevHost.appendChild(formEl);
-  }
+  rebuildFormPreviewInShell(prevHost, block);
 
   body.appendChild(hint);
   body.appendChild(toolbar);
@@ -3553,8 +3671,9 @@ function renderDynamicUiModule(block, card) {
   const gen = document.createElement("button");
   gen.type = "button";
   gen.className = "dynamic-ui-generate";
-  gen.textContent = "Erzeugen / neu erzeugen";
   gen.disabled = locked;
+  gen.setAttribute("aria-busy", "false");
+  gen.innerHTML = `<span class="dynamic-ui-generate-label">Erzeugen / neu erzeugen</span><span class="dynamic-ui-generate-spinner" hidden aria-hidden="true">${DYNAMIC_UI_GEN_SPINNER_SVG}</span>`;
   gen.addEventListener("click", () => {
     void (async () => {
       const txt = String(block.values.uiPrompt || "").trim();
@@ -3562,10 +3681,7 @@ function renderDynamicUiModule(block, card) {
         showToast("Beschreibung ist leer.");
         return;
       }
-      const prevLabel = gen.textContent;
-      gen.disabled = true;
-      ta.disabled = true;
-      gen.textContent = "Erzeuge …";
+      setDynamicUiGenerateBusy(gen, ta, true, locked);
       try {
         const res = await fetch("/api/dynamic-ui/generate", {
           method: "POST",
@@ -3584,7 +3700,8 @@ function renderDynamicUiModule(block, card) {
         } else if (block.role === "output") {
           block.dynamicUiOutputSchema = null;
         }
-        renderAll();
+        rerenderModuleCard(block);
+        if (block.role === "input" && state.running) syncDynamicUiRunWidgetSync();
         showToast(
           block.role === "output" && block.dynamicUiOutputSchema
             ? "HTML und JSON-Schema erzeugt — Vorschau aktualisiert."
@@ -3593,9 +3710,7 @@ function renderDynamicUiModule(block, card) {
       } catch (e) {
         showToast(`Erzeugen: ${String(e && e.message ? e.message : e).slice(0, 160)}`);
       } finally {
-        gen.disabled = locked;
-        ta.disabled = locked;
-        gen.textContent = prevLabel;
+        setDynamicUiGenerateBusy(gen, ta, false, locked);
       }
     })();
   });
@@ -3616,12 +3731,18 @@ function renderDynamicUiModule(block, card) {
   }
 
   const host = document.createElement("div");
-  renderDynamicUiBlock(
-    host,
-    block,
-    interactive,
-    interactive && block.role === "input" && !!workshopSessionIds?.dynamicUiSessionId,
-  );
+  refreshDynamicUiPreviewHost(host, block);
+
+  const reloadPrev = document.createElement("button");
+  reloadPrev.type = "button";
+  reloadPrev.className = "dynamic-ui-reload-preview";
+  reloadPrev.textContent = "Vorschau neu laden";
+  reloadPrev.disabled = locked;
+  reloadPrev.addEventListener("click", () => {
+    refreshDynamicUiPreviewHost(host, block);
+    showToast("Vorschau neu geladen.");
+  });
+  btns.appendChild(reloadPrev);
 
   body.appendChild(lbl);
   body.appendChild(ta);
@@ -3648,6 +3769,66 @@ const PTT_ICON_MIC_LIVE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 const PTT_ICON_MIC_MUTED = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.84 18.84A8 8 0 0 1 5 15H3a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2h1"/><path d="M10.37 10.37a5 5 0 0 0-1.17 3.13V15"/><path d="M15 15v-3a5 5 0 0 0-.91-2.84"/><path d="M9 9v-1a3 3 0 0 1 5.12-2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 
 /**
+ * @param {{ values: Record<string, string> }} block
+ * @param {HTMLElement} bar
+ */
+function syncAudioLivePttBar(block, bar) {
+  const hint = bar.querySelector(".ptt-live-hint");
+  const btn = bar.querySelector(".ptt-live-btn");
+  if (!hint || !btn) return;
+  const running = state.running;
+  const liveMic = state.runMode === "realtime" && realtimeLocalStream;
+  const isHold = block.values.pttStyle !== "toggle";
+  if (!running) {
+    hint.textContent = isHold
+      ? "Start a run to use the button. Hold while speaking."
+      : "Start a run to use the button. Press to unmute the mic, press again to mute.";
+  } else if (liveMic) {
+    hint.textContent = isHold
+      ? "Hold to unmute the microphone; release to mute again. While running, holding Ctrl does the same."
+      : "Press to unmute the microphone; press again to mute. While running, Ctrl toggles the same way.";
+  } else {
+    hint.textContent =
+      "Realtime is active but no microphone track is available yet — check permissions or wait for capture.";
+  }
+  btn.disabled = !running;
+}
+
+function syncDynamicUiRunWidgetSync() {
+  if (!state.running || !workshopSessionIds?.dynamicUiSessionId) return;
+  const W = globalThis.workshopDynamicUi;
+  if (!W || typeof W.attachWidgetSync !== "function") return;
+  for (const b of state.blocks) {
+    if (b.role !== "input" || b.typeId !== "dynamic-ui") continue;
+    const card = document.querySelector(`[data-block-id="${CSS.escape(b.id)}"]`);
+    const host = card?.querySelector(".dynamic-ui-stage");
+    if (host) {
+      W.attachWidgetSync(host, (key, val) => scheduleWorkshopDynamicUiWidgetPatch(key, val));
+    }
+  }
+}
+
+/** Update run-only module chrome without tearing down field DOM (sliders, forms, dynamic UI). */
+function syncRunModuleChrome() {
+  const running = state.running;
+  document.querySelectorAll(".module-card-remove").forEach((btn) => {
+    btn.disabled = running;
+    btn.classList.toggle("is-disabled", running);
+  });
+  document.querySelectorAll(".input-send-btn").forEach((btn) => {
+    btn.disabled = !(running && state.runMode === "realtime");
+  });
+  for (const b of state.blocks) {
+    if (b.role !== "input" || b.typeId !== "audio-live" || b.values.turnTaking !== "ptt") continue;
+    const card = document.querySelector(`[data-block-id="${CSS.escape(b.id)}"]`);
+    const bar = card?.querySelector(".ptt-live-bar");
+    if (bar) syncAudioLivePttBar(b, bar);
+  }
+  syncDynamicUiRunWidgetSync();
+  syncOutputTextChatFromState();
+}
+
+/**
  * Push-to-talk: toggles the outgoing Realtime mic track (`enabled`).
  */
 function renderAudioLivePttBar(block, card) {
@@ -3661,27 +3842,12 @@ function renderAudioLivePttBar(block, card) {
   const hint = document.createElement("p");
   hint.className = "field-hint ptt-live-hint";
 
-  const running = state.running;
-  const liveMic = state.runMode === "realtime" && realtimeLocalStream;
   const isHold = block.values.pttStyle !== "toggle";
-
-  if (!running) {
-    hint.textContent = isHold
-      ? "Start a run to use the button. Hold while speaking."
-      : "Start a run to use the button. Press to unmute the mic, press again to mute.";
-  } else if (liveMic) {
-    hint.textContent = isHold
-      ? "Hold to unmute the microphone; release to mute again. While running, holding Ctrl does the same."
-      : "Press to unmute the microphone; press again to mute. While running, Ctrl toggles the same way.";
-  } else {
-    hint.textContent =
-      "Realtime is active but no microphone track is available yet — check permissions or wait for capture.";
-  }
 
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "ptt-live-btn";
-  btn.disabled = !running;
+  btn.disabled = !state.running;
   btn.setAttribute("aria-pressed", "false");
   btn.setAttribute("aria-label", isHold ? "Hold to speak — microphone live while pressed" : "Push to talk — toggle microphone");
   const iconWrap = document.createElement("span");
@@ -3708,27 +3874,25 @@ function renderAudioLivePttBar(block, card) {
       }
     };
     setHoldVisual(false);
-    if (running) {
-      const release = () => {
-        setHoldVisual(false);
-        if (liveMic) setRealtimeLocalMicEnabled(false);
-      };
-      btn.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0 || btn.disabled) return;
-        e.preventDefault();
-        try {
-          btn.setPointerCapture(e.pointerId);
-        } catch (_) {
-          /* ignore */
-        }
-        setHoldVisual(true);
-        if (liveMic) setRealtimeLocalMicEnabled(true);
-      });
-      btn.addEventListener("pointerup", release);
-      btn.addEventListener("pointercancel", release);
-      btn.addEventListener("lostpointercapture", release);
-    }
-    lastAudioLivePttUi = { mode: "hold", setHoldVisual, liveMic };
+    const release = () => {
+      setHoldVisual(false);
+      if (state.runMode === "realtime" && realtimeLocalStream) setRealtimeLocalMicEnabled(false);
+    };
+    btn.addEventListener("pointerdown", (e) => {
+      if (!state.running || e.button !== 0 || btn.disabled) return;
+      e.preventDefault();
+      try {
+        btn.setPointerCapture(e.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+      setHoldVisual(true);
+      if (state.runMode === "realtime" && realtimeLocalStream) setRealtimeLocalMicEnabled(true);
+    });
+    btn.addEventListener("pointerup", release);
+    btn.addEventListener("pointercancel", release);
+    btn.addEventListener("lostpointercapture", release);
+    lastAudioLivePttUi = { mode: "hold", setHoldVisual };
   } else {
     const syncToggleUi = () => {
       const on = audioLivePttToggleState.get(block.id) === true;
@@ -3741,22 +3905,22 @@ function renderAudioLivePttBar(block, card) {
         setIcon("muted");
         labelEl.textContent = "Tap to unmute";
       }
-      if (liveMic) setRealtimeLocalMicEnabled(on);
+      if (state.runMode === "realtime" && realtimeLocalStream) setRealtimeLocalMicEnabled(on);
     };
     syncToggleUi();
-    if (running) {
-      btn.addEventListener("click", () => {
-        audioLivePttToggleState.set(block.id, !audioLivePttToggleState.get(block.id));
-        syncToggleUi();
-      });
-    }
-    lastAudioLivePttUi = { mode: "toggle", syncToggle: syncToggleUi, blockId: block.id, liveMic };
+    btn.addEventListener("click", () => {
+      if (!state.running || btn.disabled) return;
+      audioLivePttToggleState.set(block.id, !audioLivePttToggleState.get(block.id));
+      syncToggleUi();
+    });
+    lastAudioLivePttUi = { mode: "toggle", syncToggle: syncToggleUi, blockId: block.id };
   }
 
   wrap.appendChild(title);
   wrap.appendChild(hint);
   wrap.appendChild(btn);
   card.appendChild(wrap);
+  syncAudioLivePttBar(block, wrap);
 }
 
 
@@ -4214,7 +4378,7 @@ async function handleRealtimeResponseDone(msg) {
             } finally {
               stopImageGenerationProgressUi();
             }
-            renderAll();
+            refreshImageOutputBlocks();
           }
         } else if (name === "workshop_synthesize_speech") {
           let args = {};
@@ -4240,7 +4404,7 @@ async function handleRealtimeResponseDone(msg) {
             for (const b of state.blocks) {
               if (b.role === "output" && b.typeId === "audio") b._runAudioGenerating = true;
             }
-            renderAll();
+            refreshAudioOutputBlocks();
             try {
               const res = await fetch("/api/audio/speech", {
                 method: "POST",
@@ -4285,7 +4449,7 @@ async function handleRealtimeResponseDone(msg) {
                 if (b.role === "output" && b.typeId === "audio") delete b._runAudioGenerating;
               }
             }
-            renderAll();
+            refreshAudioOutputBlocks();
           }
         } else if (name === "workshop_emit_form_values") {
           let args = {};
@@ -4322,7 +4486,7 @@ async function handleRealtimeResponseDone(msg) {
               `tool:${callId}:done`,
             );
             outStr = JSON.stringify({ ok: true, message: "Form output widgets updated." });
-            renderAll();
+            refreshFormOutputPreviews();
           }
         } else if (name === "workshop_emit_dynamic_ui") {
           let args = {};
@@ -4405,7 +4569,7 @@ async function handleRealtimeResponseDone(msg) {
                   }),
                 });
               }
-              renderAll();
+              refreshDynamicUiOutputBlocks(outs);
             }
           }
         } else if (name === "workshop_mock_tooling_call") {
@@ -4508,7 +4672,7 @@ async function handleRealtimeResponseDone(msg) {
                     }
                   });
               }
-              renderAll();
+              refreshDynamicUiOutputBlocks();
               outStr = JSON.stringify(j.ok !== false ? j : { ok: false, error: "patch_failed" });
             } catch {
               outStr = JSON.stringify({ ok: false, error: "patch_failed" });
@@ -4754,7 +4918,7 @@ function init() {
       if (pttCtrlMicEngaged) return;
       pttCtrlMicEngaged = true;
       lastAudioLivePttUi.setHoldVisual(true);
-      if (lastAudioLivePttUi.liveMic) setRealtimeLocalMicEnabled(true);
+      if (realtimeLocalStream) setRealtimeLocalMicEnabled(true);
     } else {
       audioLivePttToggleState.set(pttBlock.id, !audioLivePttToggleState.get(pttBlock.id));
       lastAudioLivePttUi.syncToggle();

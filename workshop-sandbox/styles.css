@@ -50,10 +50,10 @@ a {
 header.app-header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.9rem 1.25rem;
+  gap: 0.75rem 1rem;
+  padding: 0.5rem 1.25rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
   position: sticky;
@@ -61,56 +61,11 @@ header.app-header {
   z-index: 40;
 }
 
-.header-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 1rem 1.5rem;
-}
-
-.brand {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.brand h1 {
+.app-title {
   margin: 0;
   font-size: 1.1rem;
   font-weight: 600;
   letter-spacing: -0.02em;
-}
-
-.brand p {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  max-width: 48ch;
-}
-
-.badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.badge {
-  font-size: 0.68rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 0.3rem 0.55rem;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  background: var(--bg);
-}
-
-.badge.mock {
-  border-color: #c9a227;
-  color: #6b5500;
-  background: #faf6e8;
 }
 
 .header-actions {
@@ -1720,6 +1675,9 @@ footer.status-bar {
 }
 
 .dynamic-ui-generate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   font: inherit;
   font-size: 0.74rem;
   font-weight: 600;
@@ -1732,6 +1690,48 @@ footer.status-bar {
 }
 
 .dynamic-ui-generate:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dynamic-ui-generate-spinner {
+  display: inline-flex;
+  line-height: 0;
+}
+
+.dynamic-ui-generate-spinner[hidden] {
+  display: none;
+}
+
+.dynamic-ui-generate-spinner-blades {
+  transform-origin: 12px 12px;
+  animation: dynamic-ui-gen-spin 0.95s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dynamic-ui-generate-spinner-blades {
+    animation: none;
+  }
+}
+
+@keyframes dynamic-ui-gen-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dynamic-ui-reload-preview {
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.38rem 0.82rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.dynamic-ui-reload-preview:disabled {
   opacity: 0.45;
   cursor: default;
 }

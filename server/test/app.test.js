@@ -273,14 +273,19 @@ describe("HTTP API", () => {
     process.env.OPENAI_API_KEY = "sk-test";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({
-            choices: [{ message: { content: JSON.stringify({ html: "<p>x</p>" }) } }],
-          }),
-      })),
+      vi.fn(async (url) => {
+        if (String(url).includes("/responses")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                output_text: JSON.stringify({ html: "<p>x</p>" }),
+              }),
+          };
+        }
+        return { ok: false, status: 404, text: async () => "" };
+      }),
     );
     const app = createApp({ staticRoot });
     const res = await request(app)

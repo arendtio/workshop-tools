@@ -9,6 +9,9 @@ const DEFAULT_RESPONSES_IMAGE_MODEL = "gpt-5.4-mini";
 /** Engine passed to the `image_generation` tool (actual pixel generator). */
 const DEFAULT_IMAGE_TOOL_ENGINE = "gpt-image-2";
 
+/** `image_generation` tool quality: low | medium | high | auto */
+const DEFAULT_IMAGE_TOOL_QUALITY = "low";
+
 /**
  * @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[] }} plan
  */
@@ -222,6 +225,7 @@ export function extractImageFromResponsesApi(data) {
  *   baseUrl?: string,
  *   responsesModel?: string,
  *   imageToolModel?: string,
+ *   imageToolQuality?: string,
  *   fetchImpl?: typeof fetch,
  *   referenceImages?: unknown
  * }} [options]
@@ -278,7 +282,7 @@ export async function generateWorkshopImageFromPlan(plan, prompt, options = {}) 
   const imageTool = {
     type: "image_generation",
     action: "auto",
-    quality: "auto",
+    quality: options.imageToolQuality ?? process.env.OPENAI_IMAGE_TOOL_QUALITY ?? DEFAULT_IMAGE_TOOL_QUALITY,
     size: mapPlanSizeToResponsesImageToolSize(String(imgBlock.values?.size ?? "1024x1024")),
   };
   if (imageToolModel) {

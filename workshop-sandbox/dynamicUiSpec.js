@@ -142,6 +142,7 @@
     const onHandler = typeof options.onHandler === "function" ? options.onHandler : null;
 
     host.innerHTML = "";
+    delete host.dataset.wduiSyncAttached;
     host.className = "dynamic-ui-stage wdui-root";
 
     const wrap = document.createElement("div");
@@ -186,43 +187,65 @@
     }
 
     if (role === "input" && interactive && schedulePatch) {
-      const sync = (ev) => {
-        const t = ev.target;
-        if (!(t instanceof HTMLElement) || !wrap.contains(t)) return;
-        const pathEl = t.closest("[data-wdui-path]");
-        if (pathEl) {
-          const path = pathEl.getAttribute("data-wdui-path");
-          if (!path) return;
-          let v = "";
-          if (pathEl instanceof HTMLInputElement && pathEl.type === "checkbox") v = pathEl.checked ? "1" : "0";
-          else if (
-            pathEl instanceof HTMLInputElement ||
-            pathEl instanceof HTMLTextAreaElement ||
-            pathEl instanceof HTMLSelectElement
-          ) {
-            v = String(pathEl.value);
-          }
-          schedulePatch(`field:${path}`, v);
-          return;
-        }
-        if (t.matches("input[name], textarea[name], select[name]")) {
-          const name = t.getAttribute("name");
-          if (!name) return;
-          let v = "";
-          if (t instanceof HTMLInputElement && t.type === "checkbox") v = t.checked ? "1" : "0";
-          else if (
-            t instanceof HTMLInputElement ||
-            t instanceof HTMLTextAreaElement ||
-            t instanceof HTMLSelectElement
-          ) {
-            v = String(t.value);
-          }
-          schedulePatch(`name:${name}`, v);
-        }
-      };
-      wrap.addEventListener("input", sync, true);
-      wrap.addEventListener("change", sync, true);
+      bindWidgetSyncListeners(wrap, schedulePatch);
+      host.dataset.wduiSyncAttached = "1";
     }
+  }
+
+  /**
+   * @param {HTMLElement} wrap
+   * @param {(key: string, val: string) => void} schedulePatch
+   */
+  function bindWidgetSyncListeners(wrap, schedulePatch) {
+    const sync = (ev) => {
+      const t = ev.target;
+      if (!(t instanceof HTMLElement) || !wrap.contains(t)) return;
+      const pathEl = t.closest("[data-wdui-path]");
+      if (pathEl) {
+        const path = pathEl.getAttribute("data-wdui-path");
+        if (!path) return;
+        let v = "";
+        if (pathEl instanceof HTMLInputElement && pathEl.type === "checkbox") v = pathEl.checked ? "1" : "0";
+        else if (
+          pathEl instanceof HTMLInputElement ||
+          pathEl instanceof HTMLTextAreaElement ||
+          pathEl instanceof HTMLSelectElement
+        ) {
+          v = String(pathEl.value);
+        }
+        schedulePatch(`field:${path}`, v);
+        return;
+      }
+      if (t.matches("input[name], textarea[name], select[name]")) {
+        const name = t.getAttribute("name");
+        if (!name) return;
+        let v = "";
+        if (t instanceof HTMLInputElement && t.type === "checkbox") v = t.checked ? "1" : "0";
+        else if (
+          t instanceof HTMLInputElement ||
+          t instanceof HTMLTextAreaElement ||
+          t instanceof HTMLSelectElement
+        ) {
+          v = String(t.value);
+        }
+        schedulePatch(`name:${name}`, v);
+      }
+    };
+    wrap.addEventListener("input", sync, true);
+    wrap.addEventListener("change", sync, true);
+  }
+
+  /**
+   * Wire widget sync on an existing preview host (after Realtime run starts).
+   * @param {HTMLElement} host
+   * @param {(key: string, val: string) => void} schedulePatch
+   */
+  function attachWidgetSync(host, schedulePatch) {
+    if (!host || host.dataset.wduiSyncAttached === "1") return;
+    const wrap = host.querySelector(".wdui-html-host");
+    if (!wrap || typeof schedulePatch !== "function") return;
+    host.dataset.wduiSyncAttached = "1";
+    bindWidgetSyncListeners(wrap, schedulePatch);
   }
 
   g.workshopDynamicUi = {
@@ -230,5 +253,6 @@
     collectFieldValuesFromDom,
     getByPath,
     renderInto,
+    attachWidgetSync,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);
