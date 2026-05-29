@@ -14,6 +14,9 @@ import {
   patchDynamicUiSession,
   readDynamicUiSession,
 } from "./dynamicUiSessionStore.js";
+import { generateLogPool, listLogPools, resolveAnalyzerPoolName, runLogPoolSql } from "./logPools/store.js";
+import { sanitizePoolName } from "./logPools/paths.js";
+import { planHasLogAnalyzer } from "./logPoolTools.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,6 +46,34 @@ export function createApp(opts) {
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "workshop-server" });
+  });
+
+  app.get("/api/log-pools", (_req, res) => {
+    try {
+      return res.json({ ok: true, ...listLogPools() });
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: "list_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.post("/api/log-pools/generate", (req, res) => {
+    const out = generateLogPool(req.body?.call && typeof req.body.call === "object" ? req.body.call : req.body);
+    return res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.post("/api/log-pools/sql", (req, res) => {
+    const poolRaw = req.body?.pool ?? req.body?.name;
+    const pool = sanitizePoolName(poolRaw);
+    if (!pool) {
+      return res.status(400).json({ ok: false, error: "invalid_pool", message: "Missing or invalid pool name." });
+    }
+    const sql = req.body?.sql ?? req.body?.query;
+    const out = runLogPoolSql(pool, String(sql ?? ""));
+    return res.status(out.ok ? 200 : 400).json(out);
   });
 
   app.post("/api/plan/validate", (req, res) => {
@@ -97,6 +128,10 @@ export function createApp(opts) {
       };
       if (toolingMockSessionId) payload.tooling_mock_session_id = toolingMockSessionId;
       if (dynamicUiSessionId) payload.dynamic_ui_session_id = dynamicUiSessionId;
+      if (planHasLogAnalyzer(result.plan)) {
+        const pool = resolveAnalyzerPoolName(result.plan);
+        if (pool) payload.log_pool_name = pool;
+      }
       return res.json(payload);
     } catch (e) {
       const st = typeof e.status === "number" ? e.status : NaN;

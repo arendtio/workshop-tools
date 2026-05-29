@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildFullRealtimeInstructions } from "../src/orchestrateRealtime.js";
+import { generateLogPool } from "../src/logPools/store.js";
 import {
   buildRealtimePostConnectSession,
   mintRealtimeClientSecret,
@@ -138,6 +142,31 @@ describe("buildRealtimePostConnectSession", () => {
     expect(names).toContain("workshop_emit_form_values");
     expect(names).toContain("workshop_emit_dynamic_ui");
     expect(names).not.toContain("workshop_generate_image");
+  });
+
+  it("registers log generator and analyzer SQL tools", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "workshop-log-tools-"));
+    process.env.WORKSHOP_LOG_POOLS_DIR = tmpDir;
+    generateLogPool({ name: "analyze-me", target_size_mb: 1, seed: 1 });
+
+    const genSession = buildRealtimePostConnectSession({
+      blocks: [
+        { role: "process", typeId: "log-generator", values: {} },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(genSession.tools?.map((t) => t.name)).toContain("workshop_log_pool_generate");
+
+    const anSession = buildRealtimePostConnectSession({
+      blocks: [
+        { role: "process", typeId: "log-analyzer", values: { logPool: "analyze-me" } },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(anSession.tools?.map((t) => t.name)).toContain("workshop_log_sql");
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.WORKSHOP_LOG_POOLS_DIR;
   });
 
   it("registers mock tooling + dynamic UI tools when session ids are present on the plan", () => {

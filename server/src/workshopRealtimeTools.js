@@ -1,5 +1,12 @@
 import { buildWorkshopImageGenerationTool, planHasImageOutput } from "./imageGeneration.js";
 import { buildWorkshopSynthesizeSpeechTool, planHasSpeechFileOutput } from "./speechGeneration.js";
+import {
+  buildWorkshopLogPoolGenerateTool,
+  buildWorkshopLogSqlTool,
+  planHasLogAnalyzer,
+  planHasLogGenerator,
+} from "./logPoolTools.js";
+import { logPoolExists, resolveAnalyzerPoolName } from "./logPools/store.js";
 
 /**
  * @param {{ blocks: { role: string, typeId: string }[] }} plan
@@ -189,6 +196,15 @@ export function buildWorkshopRealtimeTools(plan) {
   if (planUsesDynamicUiModule(plan) && String(plan.dynamicUiSessionId || "").trim()) {
     tools.push(buildWorkshopDynamicUiReadStateTool(plan));
     tools.push(buildWorkshopDynamicUiApplyDataTool(plan));
+  }
+  if (planHasLogGenerator(plan)) {
+    tools.push(buildWorkshopLogPoolGenerateTool());
+  }
+  if (planHasLogAnalyzer(plan)) {
+    const pool = resolveAnalyzerPoolName(plan);
+    if (pool && logPoolExists(pool)) {
+      tools.push(buildWorkshopLogSqlTool(pool));
+    }
   }
   return tools;
 }

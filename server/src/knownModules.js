@@ -9,7 +9,14 @@ export const INPUT_TYPE_IDS = [
 ];
 
 /** @type {readonly string[]} */
-export const PROCESS_TYPE_IDS = ["instruction", "vector-db", "tooling", "skills"];
+export const PROCESS_TYPE_IDS = [
+  "instruction",
+  "vector-db",
+  "tooling",
+  "skills",
+  "log-generator",
+  "log-analyzer",
+];
 
 /** @type {readonly string[]} */
 export const OUTPUT_TYPE_IDS = [

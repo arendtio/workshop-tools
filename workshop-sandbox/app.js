@@ -35,6 +35,20 @@ const PROCESS_TYPES = [
     live: false,
   },
   { id: "skills", code: "SKL", title: "Skills / context", desc: "Platform-hosted skill presets", live: false },
+  {
+    id: "log-generator",
+    code: "LOG+",
+    title: "Log generator",
+    desc: "Agent creates a large SQLite business log pool on the server",
+    live: false,
+  },
+  {
+    id: "log-analyzer",
+    code: "LOG?",
+    title: "Log analyzer",
+    desc: "Query a persisted log pool via read-only SQL tools",
+    live: false,
+  },
 ];
 
 const OUTPUT_TYPES = [
@@ -110,9 +124,57 @@ const BUILTIN_PRESETS = {
       { role: "output", typeId: "dynamic-ui" },
     ],
   },
+  "log-generate": {
+    label: "Log erzeugen",
+    blocks: [
+      {
+        role: "input",
+        typeId: "text",
+        values: {
+          content:
+            "Bitte erzeuge einen Business-Log-Topf namens shop-demo (ca. 10 MB) mit dem Shop-Paket-Szenario.",
+        },
+      },
+      {
+        role: "process",
+        typeId: "instruction",
+        values: {
+          system:
+            "Du bist ein Workshop-Assistent für Log-Erzeugung. Nutze ausschließlich das Tool workshop_log_pool_generate — erfinde keine Log-Zeilen im Chat. Bestätige danach Metadaten (Name, Zeilen, Größe).",
+        },
+      },
+      { role: "process", typeId: "log-generator" },
+      { role: "output", typeId: "text" },
+    ],
+  },
+  "log-analyze": {
+    label: "Log analysieren",
+    blocks: [
+      {
+        role: "input",
+        typeId: "text",
+        values: {
+          content:
+            "Wie viele Events mit Priorität error oder blocker gibt es? Welche message_keys sind am häufigsten?",
+        },
+      },
+      {
+        role: "process",
+        typeId: "instruction",
+        values: {
+          system:
+            "Du analysierst einen zu großen SQLite-Log nur über workshop_log_sql (SELECT). Niemals den gesamten Log in die Antwort kopieren. Nenne die verwendeten Queries und eine klare Zusammenfassung.",
+        },
+      },
+      { role: "process", typeId: "log-analyzer", values: { logPool: "shop-demo" } },
+      { role: "output", typeId: "text" },
+    ],
+  },
 };
 
 const LAYOUT_STORAGE_KEY = "workshop-sandbox-layouts-v1";
+const SETUP_EXPORT_FORMAT = "workshop-sandbox-setup";
+const SETUP_EXPORT_VERSION = 1;
 const DEFAULT_BUILTIN_PRESET_ID = "text-prompt";
 
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
@@ -375,6 +437,58 @@ const FORM_SCHEMA = {
         label: "",
         type: "hint",
         hint: "Mock tool `workshop_mock_tooling_call` + in-memory tables (customers, orders, shop, inventory) persist for each Run; access mode and domain are hints for the model.",
+      },
+    ],
+  },
+  "process:log-generator": {
+    apiMapping:
+      "Agent-only: `workshop_log_pool_generate` writes/overwrites `data/log-pools/{name}.sqlite` on the server (~10 MB simulated business logs).",
+    defaults: {
+      scenarioPreset: "shop-package-lifecycle",
+      defaultPoolName: "shop-demo",
+      defaultTargetMb: "10",
+    },
+    fields: [
+      {
+        key: "scenarioPreset",
+        label: "Szenario-Preset",
+        type: "select",
+        options: [{ value: "shop-package-lifecycle", label: "Shop · Paket-Lifecycle" }],
+      },
+      {
+        key: "defaultPoolName",
+        label: "Vorgeschlagener Topf-Name",
+        type: "text",
+        placeholder: "shop-demo",
+      },
+      {
+        key: "defaultTargetMb",
+        label: "Zielgröße (MB)",
+        type: "number",
+        placeholder: "10",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Nur per Agent-Tool — kein manueller Generate-Button. Gleicher Name überschreibt den Topf. Topfs bleiben bis Server-Neustart (optional Volume auf data/log-pools/).",
+      },
+    ],
+  },
+  "process:log-analyzer": {
+    apiMapping: "Read-only SQL via `workshop_log_sql` against the selected persisted log pool.",
+    defaults: { logPool: "" },
+    fields: [
+      {
+        key: "logPool",
+        label: "Log-Topf",
+        type: "log_pool_select",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Topf zuvor mit Pipeline „Log erzeugen“ anlegen. Analyse-Auftrag über Text-Input und Instruction-Modul. Dropdown aktualisiert sich beim Öffnen der Karte.",
       },
     ],
   },
@@ -1633,7 +1747,7 @@ function entryLabel(entry) {
   return entry.name || "Untitled";
 }
 
-function applyEntry(entry, silent) {
+async function applyEntry(entry, silent) {
   if (!entry) return false;
   if (entry.kind === "builtin") {
     if (!BUILTIN_PRESETS[entry.presetId]) return false;
@@ -1642,7 +1756,7 @@ function applyEntry(entry, silent) {
   }
   if (entry.kind === "custom") {
     if (!Array.isArray(entry.blocks)) return false;
-    if (!restorePipelineFromSnapshot(entry.blocks)) return false;
+    if (!(await restorePipelineFromSnapshot(entry.blocks))) return false;
     if (!silent) showToast(`Loaded “${entry.name || "Saved layout"}”.`);
     return true;
   }
@@ -1653,10 +1767,14 @@ function applyInitialPageLayout() {
   const { entries, favoriteEntryId } = readLayoutListStore();
   if (favoriteEntryId) {
     const fav = entries.find((e) => e.id === favoriteEntryId);
-    if (fav && applyEntry(fav, true)) return;
+    if (fav) {
+      void applyEntry(fav, true);
+      return;
+    }
   }
   if (entries.length) {
-    if (applyEntry(entries[0], true)) return;
+    void applyEntry(entries[0], true);
+    return;
   }
   applyBuiltinPreset(DEFAULT_BUILTIN_PRESET_ID, true);
 }
@@ -1700,10 +1818,12 @@ function renderExamplesSection() {
     loadBtn.className = "chip examples-item-load";
     loadBtn.textContent = label;
     loadBtn.addEventListener("click", () => {
-      if (!applyEntry(entry, false)) {
-        showToast("That layout could not be loaded.");
-        renderExamplesSection();
-      }
+      void applyEntry(entry, false).then((ok) => {
+        if (!ok) {
+          showToast("That layout could not be loaded.");
+          renderExamplesSection();
+        }
+      });
     });
 
     row.appendChild(loadBtn);
@@ -1775,51 +1895,245 @@ function saveCurrentPipelineToStore() {
   showToast("Pipeline saved to this browser.");
 }
 
+/** @param {typeof state.blocks[number]} block */
+function serializeBlockSnapshotRow(block) {
+  const row = { role: block.role, typeId: block.typeId, values: { ...(block.values || {}) } };
+  if (Array.isArray(block.formItems)) row.formItems = JSON.parse(JSON.stringify(block.formItems));
+  if (block.dynamicUiCommitted != null) row.dynamicUiCommitted = String(block.dynamicUiCommitted);
+  if (block.dynamicUiOutputSchema && typeof block.dynamicUiOutputSchema === "object") {
+    row.dynamicUiOutputSchema = JSON.parse(JSON.stringify(block.dynamicUiOutputSchema));
+  }
+  return row;
+}
+
 /** @param {typeof state.blocks} blocks */
 function serializePipelineSnapshot(blocks) {
-  return blocks.map((b) => {
-    const row = { role: b.role, typeId: b.typeId, values: { ...(b.values || {}) } };
-    if (Array.isArray(b.formItems)) row.formItems = JSON.parse(JSON.stringify(b.formItems));
-    if (b.dynamicUiCommitted != null) row.dynamicUiCommitted = String(b.dynamicUiCommitted);
-    if (b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object") {
-      row.dynamicUiOutputSchema = JSON.parse(JSON.stringify(b.dynamicUiOutputSchema));
-    }
-    return row;
-  });
+  return blocks.map((b) => serializeBlockSnapshotRow(b));
+}
+
+/**
+ * @param {typeof state.blocks[number]} block
+ * @returns {Promise<object>}
+ */
+async function serializeBlockSnapshotRowForExport(block) {
+  const row = serializeBlockSnapshotRow(block);
+  if (block._inputImageBlob instanceof Blob && block._inputImageBlob.size > 0) {
+    row._inputImageDataUrl = await readBlobAsDataUrl(block._inputImageBlob);
+  }
+  if (block._recordedAudioBlob instanceof Blob && block._recordedAudioBlob.size > 0) {
+    row._recordedAudioDataUrl = await readBlobAsDataUrl(block._recordedAudioBlob);
+  }
+  return row;
+}
+
+/** @param {typeof state.blocks} blocks */
+async function serializePipelineSnapshotForExport(blocks) {
+  /** @type {object[]} */
+  const rows = [];
+  for (const block of blocks) {
+    rows.push(await serializeBlockSnapshotRowForExport(block));
+  }
+  return rows;
 }
 
 function isValidRole(r) {
   return r === "input" || r === "process" || r === "output";
 }
 
-/** @param {ReturnType<typeof serializePipelineSnapshot>} rows */
-function restorePipelineFromSnapshot(rows) {
+/** @param {unknown} rows */
+function validatePipelineSnapshotRows(rows) {
   if (!Array.isArray(rows)) return false;
   for (const row of rows) {
     if (!row || !isValidRole(row.role) || typeof row.typeId !== "string" || !row.typeId.trim()) return false;
   }
+  return true;
+}
+
+/**
+ * @param {string} dataUrl
+ * @returns {Promise<Blob | null>}
+ */
+async function dataUrlToBlob(dataUrl) {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
+  try {
+    const res = await fetch(dataUrl);
+    return await res.blob();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {object} row
+ * @param {typeof state.blocks[number]} block
+ */
+async function applyBlockSnapshotAssets(row, block) {
+  if (typeof row._inputImageDataUrl === "string" && row._inputImageDataUrl.startsWith("data:")) {
+    const blob = await dataUrlToBlob(row._inputImageDataUrl);
+    if (blob && blob.size > 0) {
+      block._inputImageBlob = blob;
+      if (!String(block.values.uploadStub || "").trim()) {
+        block.values.uploadStub = "imported-image";
+      }
+    }
+  }
+  if (typeof row._recordedAudioDataUrl === "string" && row._recordedAudioDataUrl.startsWith("data:")) {
+    const blob = await dataUrlToBlob(row._recordedAudioDataUrl);
+    if (blob && blob.size > 0) {
+      block._recordedAudioBlob = blob;
+      if (!String(block.values.recordingStub || "").trim()) {
+        block.values.recordingStub = "imported-audio";
+      }
+    }
+  }
+}
+
+/**
+ * @param {object} row
+ * @param {typeof state.blocks[number]} block
+ */
+function applyBlockSnapshotFields(row, block) {
+  if (row.values && typeof row.values === "object") {
+    block.values = { ...block.values, ...row.values };
+  }
+  if (Array.isArray(row.formItems)) {
+    block.formItems = JSON.parse(JSON.stringify(row.formItems));
+  }
+  if (row.dynamicUiCommitted != null) {
+    block.dynamicUiCommitted = String(row.dynamicUiCommitted);
+  }
+  if (row.dynamicUiOutputSchema && typeof row.dynamicUiOutputSchema === "object") {
+    block.dynamicUiOutputSchema = JSON.parse(JSON.stringify(row.dynamicUiOutputSchema));
+  }
+}
+
+/** @param {ReturnType<typeof serializePipelineSnapshot>} rows */
+async function restorePipelineFromSnapshot(rows) {
+  if (!validatePipelineSnapshotRows(rows)) return false;
   if (state.running) void stopRealtimeRun();
   state.blocks.forEach((b) => stopBlockCapture(b.id));
   state.blocks = [];
   audioLivePttToggleState.clear();
   for (const row of rows) {
     const block = createBlock(row.role, row.typeId);
-    if (row.values && typeof row.values === "object") {
-      block.values = { ...block.values, ...row.values };
-    }
-    if (Array.isArray(row.formItems)) {
-      block.formItems = JSON.parse(JSON.stringify(row.formItems));
-    }
-    if (row.dynamicUiCommitted != null) {
-      block.dynamicUiCommitted = String(row.dynamicUiCommitted);
-    }
-    if (row.dynamicUiOutputSchema && typeof row.dynamicUiOutputSchema === "object") {
-      block.dynamicUiOutputSchema = JSON.parse(JSON.stringify(row.dynamicUiOutputSchema));
-    }
+    applyBlockSnapshotFields(row, block);
+    await applyBlockSnapshotAssets(row, block);
     state.blocks.push(block);
   }
   renderAll();
   return true;
+}
+
+/** @param {unknown} data */
+function parseSetupImportPayload(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.format === SETUP_EXPORT_FORMAT && Array.isArray(data.blocks)) {
+    return {
+      name: typeof data.name === "string" ? data.name : null,
+      blocks: data.blocks,
+    };
+  }
+  if (Array.isArray(data.blocks)) {
+    return {
+      name: typeof data.name === "string" ? data.name : null,
+      blocks: data.blocks,
+    };
+  }
+  if (Array.isArray(data)) {
+    return { name: null, blocks: data };
+  }
+  return null;
+}
+
+async function exportCurrentSetup() {
+  if (!state.blocks.length) {
+    showToast("Pipeline is empty — nothing to export.");
+    return;
+  }
+  const d = new Date();
+  const fallback = `Setup ${d.toLocaleString()}`;
+  const entered = window.prompt("Name for this export (used in the filename):", fallback);
+  if (entered === null) return;
+  const name = entered.trim() || fallback;
+
+  let blocks;
+  try {
+    blocks = await serializePipelineSnapshotForExport(state.blocks);
+  } catch (e) {
+    console.warn("Setup export failed while reading attachments", e);
+    showToast("Export failed — could not read attached files.");
+    return;
+  }
+
+  const payload = {
+    format: SETUP_EXPORT_FORMAT,
+    version: SETUP_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    name,
+    blocks,
+  };
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const slug =
+    name
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 48)
+      .toLowerCase() || "setup";
+  const filename = `workshop-${slug}-${d.toISOString().slice(0, 10)}.json`;
+
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast("Setup exported as JSON.");
+}
+
+function triggerSetupImport() {
+  const input = document.getElementById("input-import-setup");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+/** @param {Event} ev */
+async function handleSetupImportFileChange(ev) {
+  const input = /** @type {HTMLInputElement | null} */ (ev.target);
+  const file = input?.files?.[0];
+  if (!file) return;
+
+  let text;
+  try {
+    text = await file.text();
+  } catch (e) {
+    console.warn("Setup import read failed", e);
+    showToast("Could not read file.");
+    return;
+  }
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    showToast("Invalid JSON file.");
+    return;
+  }
+
+  const parsed = parseSetupImportPayload(data);
+  if (!parsed || !validatePipelineSnapshotRows(parsed.blocks)) {
+    showToast("Unrecognized setup file — expected workshop module configuration JSON.");
+    return;
+  }
+
+  const ok = await restorePipelineFromSnapshot(parsed.blocks);
+  if (ok) {
+    const label = parsed.name ? `“${parsed.name}”` : file.name;
+    showToast(`Imported ${label}.`);
+  } else {
+    showToast("Import failed — layout could not be applied.");
+  }
 }
 
 function applyBuiltinPreset(presetId, silent) {
@@ -1830,7 +2144,11 @@ function applyBuiltinPreset(presetId, silent) {
   state.blocks = [];
   audioLivePttToggleState.clear();
   p.blocks.forEach((b) => {
-    state.blocks.push(createBlock(b.role, b.typeId));
+    const block = createBlock(b.role, b.typeId);
+    if (b.values && typeof b.values === "object") {
+      Object.assign(block.values, b.values);
+    }
+    state.blocks.push(block);
   });
   renderAll();
   if (!silent) {
@@ -2076,6 +2394,75 @@ function renderSegmentedField(field, block, disabled, wrap) {
     bar.appendChild(b);
   });
   wrap.appendChild(bar);
+}
+
+async function fillLogPoolSelect(selectEl) {
+  const preserve = selectEl.value;
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "— Log-Topf wählen —";
+  selectEl.innerHTML = "";
+  selectEl.appendChild(empty);
+  try {
+    const res = await fetch("/api/log-pools");
+    const data = await res.json().catch(() => ({}));
+    const pools = data.ok && Array.isArray(data.pools) ? data.pools : [];
+    pools.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = String(p.name || "");
+      const mb = p.size_bytes ? ` · ${(p.size_bytes / (1024 * 1024)).toFixed(1)} MB` : "";
+      const rows = p.row_count != null ? ` · ${p.row_count} rows` : "";
+      o.textContent = `${p.name}${rows}${mb}`;
+      selectEl.appendChild(o);
+    });
+    if (!pools.length) {
+      const none = document.createElement("option");
+      none.value = "";
+      none.disabled = true;
+      none.textContent = "(noch keine Topfs — zuerst Log erzeugen)";
+      selectEl.appendChild(none);
+    }
+  } catch {
+    const err = document.createElement("option");
+    err.value = "";
+    err.disabled = true;
+    err.textContent = "(Liste nicht geladen)";
+    selectEl.appendChild(err);
+  }
+  if (preserve && [...selectEl.options].some((o) => o.value === preserve)) {
+    selectEl.value = preserve;
+  }
+}
+
+function renderLogPoolSelectField(field, block, locked, wrap) {
+  const row = document.createElement("div");
+  row.className = "media-device-row";
+  const sel = document.createElement("select");
+  sel.disabled = locked;
+  sel.addEventListener("change", () => {
+    block.values[field.key] = sel.value;
+  });
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "media-device-refresh";
+  refresh.textContent = "Aktualisieren";
+  refresh.disabled = locked;
+  refresh.addEventListener("click", async () => {
+    await fillLogPoolSelect(sel);
+    showToast("Log-Topf-Liste aktualisiert.");
+  });
+  row.appendChild(sel);
+  row.appendChild(refresh);
+  wrap.appendChild(row);
+  fillLogPoolSelect(sel).then(() => {
+    const v = block.values[field.key] || "";
+    if (v && [...sel.options].some((o) => o.value === v)) {
+      sel.value = v;
+    } else if (sel.options.length > 1 && sel.options[1].value) {
+      sel.selectedIndex = 0;
+      block.values[field.key] = sel.value || "";
+    }
+  });
 }
 
 async function fillMediaDeviceSelect(selectEl, kind) {
@@ -4021,6 +4408,11 @@ function renderModuleCard(block, container) {
       form.appendChild(wrap);
       return;
     }
+    if (field.type === "log_pool_select") {
+      renderLogPoolSelectField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
+    }
     if (field.type === "audio_record") {
       renderAudioRecordField(field, block, locked, wrap);
       form.appendChild(wrap);
@@ -4572,6 +4964,89 @@ async function handleRealtimeResponseDone(msg) {
               refreshDynamicUiOutputBlocks(outs);
             }
           }
+        } else if (name === "workshop_log_pool_generate") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const genBlock = state.blocks.find((b) => b.role === "process" && b.typeId === "log-generator");
+          if (!args.name && genBlock) {
+            args.name = String(genBlock.values.defaultPoolName || "").trim();
+          }
+          if (args.target_size_mb == null && genBlock) {
+            const mb = Number(genBlock.values.defaultTargetMb);
+            if (Number.isFinite(mb)) args.target_size_mb = mb;
+          }
+          if (!args.scenario_preset && genBlock) {
+            args.scenario_preset = String(genBlock.values.scenarioPreset || "shop-package-lifecycle");
+          }
+          appendSystemTranscriptToTextOutputs(
+            "Tool · workshop_log_pool_generate",
+            `Generating pool "${String(args.name || "")}"…`,
+            `tool:${callId}:start`,
+          );
+          try {
+            const res = await fetch("/api/log-pools/generate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ call: args }),
+            });
+            const data = await res.json().catch(() => ({}));
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_log_pool_generate",
+              `Result:\n${JSON.stringify(data, null, 2).slice(0, 6000)}`,
+              `tool:${callId}:done`,
+            );
+            outStr = JSON.stringify(data);
+          } catch (err) {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_log_pool_generate",
+              String(/** @type {Error} */ (err).message || err),
+              `tool:${callId}:done`,
+            );
+            outStr = JSON.stringify({ ok: false, error: "generate_fetch_failed" });
+          }
+        } else if (name === "workshop_log_sql") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const anBlock = state.blocks.find((b) => b.role === "process" && b.typeId === "log-analyzer");
+          const pool = String(anBlock?.values?.logPool || "").trim();
+          if (!pool) {
+            outStr = JSON.stringify({ ok: false, error: "no_pool_selected" });
+          } else {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_log_sql",
+              `SQL on ${pool}:\n${String(args.sql || "").slice(0, 2000)}`,
+              `tool:${callId}:start`,
+            );
+            try {
+              const res = await fetch("/api/log-pools/sql", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pool, sql: args.sql }),
+              });
+              const data = await res.json().catch(() => ({}));
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_log_sql",
+                `Result:\n${JSON.stringify(data, null, 2).slice(0, 6000)}`,
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify(data);
+            } catch (err) {
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_log_sql",
+                String(/** @type {Error} */ (err).message || err),
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify({ ok: false, error: "sql_fetch_failed" });
+            }
+          }
         } else if (name === "workshop_mock_tooling_call") {
           let args = {};
           try {
@@ -4884,6 +5359,18 @@ async function startRunFromHotkey() {
 function init() {
   document.getElementById("btn-save-custom-layout").addEventListener("click", () => {
     saveCurrentPipelineToStore();
+  });
+
+  document.getElementById("btn-export-setup").addEventListener("click", () => {
+    void exportCurrentSetup();
+  });
+
+  document.getElementById("btn-import-setup").addEventListener("click", () => {
+    triggerSetupImport();
+  });
+
+  document.getElementById("input-import-setup").addEventListener("change", (ev) => {
+    void handleSetupImportFileChange(ev);
   });
 
   document.getElementById("fab-run").addEventListener("click", () => {

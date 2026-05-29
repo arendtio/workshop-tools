@@ -6,6 +6,17 @@ import {
 } from "../src/orchestrateRealtime.js";
 
 describe("orchestrateRealtime", () => {
+  it("includes log generator and analyzer guidance", () => {
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        { role: "process", typeId: "log-generator", values: { defaultPoolName: "shop-demo" } },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(text).toContain("workshop_log_pool_generate");
+    expect(text).toContain("shop-demo");
+  });
+
   it("includes vector and tooling context in instructions", () => {
     const text = buildFullRealtimeInstructions({
       blocks: [

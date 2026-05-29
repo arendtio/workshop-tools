@@ -1,1 +1,3 @@
 server/node_modules/
+data/log-pools/*.sqlite
+data/log-pools/*.sqlite-journal

@@ -3,6 +3,8 @@
  * post-connect client events (OpenAI Realtime client event shapes).
  */
 
+import { getLogPoolSummary, logPoolExists, resolveAnalyzerPoolName } from "./logPools/store.js";
+
 const SKILL_SNIPPETS = {
   none: "",
   "workshop-general":
@@ -150,6 +152,48 @@ export function buildFullRealtimeInstructions(plan) {
         `The Realtime tool \`workshop_mock_tooling_call\` exposes a small in-memory customers / orders / shop / inventory dataset that **persists for this run** (session id is injected server-side when the client secret is minted). ` +
         `Use list/get/create/update/delete on the matching domain; do not invent private production data.`,
     );
+  }
+
+  const logGen = plan.blocks.find((b) => b.role === "process" && b.typeId === "log-generator");
+  if (logGen) {
+    const preset = String(logGen.values?.scenarioPreset ?? "shop-package-lifecycle").trim();
+    const defaultName = String(logGen.values?.defaultPoolName ?? "").trim();
+    parts.push(
+      "## Workshop: log generator (agent-only)\n\n" +
+        "The participant wants a **large business log** (typically ~10 MB SQLite on the server) — intentionally **too big** to paste into context. " +
+        "You **must** call `workshop_log_pool_generate` to create or overwrite a named pool; do not invent log lines in chat. " +
+        `Default scenario preset in the UI: \`${preset}\` (shop package lifecycle: delivery, goods receipt, scan, pickup, error paths). ` +
+        "Each `message_key` has a fixed priority and message template; the server simulates correlated package timelines. " +
+        (defaultName
+          ? `Suggested pool name from the workbench: \`${defaultName}\` (still confirm with the participant). `
+          : "") +
+        "After generation, summarize only metadata (name, row count, size, sample message keys) and confirm the pool is ready for a separate analyze pipeline.",
+    );
+  }
+
+  const logAn = plan.blocks.find((b) => b.role === "process" && b.typeId === "log-analyzer");
+  if (logAn) {
+    const pool = resolveAnalyzerPoolName(plan);
+    let block =
+      "## Workshop: log analyzer (SQL tools only)\n\n" +
+      "The log lives in server-side SQLite (`events` table). It is **far larger than context** — never ask to paste or read the full file. " +
+      "Use `workshop_log_sql` with read-only `SELECT` queries (filter on `priority`, `message_key`, `param1`–`param3`, `entity_id`, `ts`). " +
+      "Return findings in the text output with the queries you used.\n\n";
+    if (!pool) {
+      block +=
+        "**No log pool selected** in the analyzer card dropdown — ask the participant to pick a pool (created in a prior generate pipeline) and restart the run.";
+    } else if (!logPoolExists(pool)) {
+      block += `Selected pool \`${pool}\` was **not found** on the server (run the log-generator pipeline first or pick another pool).`;
+    } else {
+      const summary = getLogPoolSummary(pool);
+      if (summary.ok) {
+        block +=
+          `Active pool: \`${pool}\` — ${summary.row_count} rows, ~${Math.round(summary.size_bytes / (1024 * 1024))} MB, schema v${summary.schema_version}.\n` +
+          `Columns: id, ts, priority, message_key, message, param1, param2, param3, entity_id.\n` +
+          `Priority counts: ${summary.priorities.map((p) => `${p.priority}=${p.c}`).join(", ")}.`;
+      }
+    }
+    parts.push(block);
   }
 
   parts.push(describeConfiguredOutputs(plan));

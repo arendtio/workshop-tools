@@ -15,6 +15,14 @@ describe("HTTP API", () => {
     vi.unstubAllGlobals();
   });
 
+  it("GET /api/log-pools lists empty or existing pools", async () => {
+    const app = createApp({ staticRoot });
+    const res = await request(app).get("/api/log-pools");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.pools)).toBe(true);
+  });
+
   it("GET /api/health", async () => {
     const app = createApp({ staticRoot });
     const res = await request(app).get("/api/health");
