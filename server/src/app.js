@@ -1,4 +1,5 @@
 import express from "express";
+import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import { validatePlan } from "./validatePlan.js";
@@ -17,8 +18,23 @@ import {
 import { generateLogPool, listLogPools, resolveAnalyzerPoolName, runLogPoolSql } from "./logPools/store.js";
 import { sanitizePoolName } from "./logPools/paths.js";
 import { planHasLogAnalyzer } from "./logPoolTools.js";
+import { planHasVectorDb } from "./knowledgePoolTools.js";
+import {
+  getKnowledgePoolSummary,
+  KNOWLEDGE_MAX_FILE_BYTES,
+  listKnowledgePools,
+  resolveKnowledgePoolName,
+  searchKnowledgePool,
+  uploadKnowledgePoolFile,
+} from "./knowledgePools/store.js";
+import { sanitizeKnowledgePoolName } from "./knowledgePools/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const knowledgeUploadMulter = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: KNOWLEDGE_MAX_FILE_BYTES },
+});
 
 /**
  * @param {{ blocks: { role: string, typeId: string }[] }} plan
@@ -76,6 +92,111 @@ export function createApp(opts) {
     return res.status(out.ok ? 200 : 400).json(out);
   });
 
+  app.get("/api/knowledge-pools", (_req, res) => {
+    try {
+      return res.json({ ok: true, ...listKnowledgePools() });
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: "list_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get("/api/knowledge-pools/:name", (req, res) => {
+    const pool = sanitizeKnowledgePoolName(req.params.name);
+    if (!pool) {
+      return res.status(400).json({ ok: false, error: "invalid_pool", message: "Missing or invalid pool name." });
+    }
+    const out = getKnowledgePoolSummary(pool);
+    return res.status(out.ok ? 200 : 404).json(out);
+  });
+
+  app.post("/api/knowledge-pools/upload", (req, res) => {
+    knowledgeUploadMulter.single("file")(req, res, async (err) => {
+      if (err?.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({
+          ok: false,
+          error: "file_too_large",
+          message: `File exceeds ${KNOWLEDGE_MAX_FILE_BYTES} bytes (50 MB).`,
+        });
+      }
+      if (err) {
+        return res.status(400).json({
+          ok: false,
+          error: "upload_parse_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (!process.env.OPENAI_API_KEY) {
+        return res.status(503).json({
+          ok: false,
+          error: "NO_API_KEY",
+          message: "Server is missing OPENAI_API_KEY.",
+        });
+      }
+      const poolRaw = req.body?.pool ?? req.body?.name;
+      const pool = sanitizeKnowledgePoolName(poolRaw);
+      if (!pool) {
+        return res.status(400).json({ ok: false, error: "invalid_pool", message: "Missing or invalid pool name." });
+      }
+      const file = req.file;
+      if (!file || !file.buffer?.length) {
+        return res.status(400).json({
+          ok: false,
+          error: "missing_file",
+          message: "Provide multipart field pool and file.",
+        });
+      }
+      const filename = String(file.originalname || "upload").trim();
+      try {
+        const out = await uploadKnowledgePoolFile(pool, filename, file.buffer);
+        return res.status(out.ok ? 200 : 400).json(out);
+      } catch (e) {
+        const code = /** @type {{ code?: string }} */ (e).code;
+        const st = typeof e.status === "number" ? e.status : NaN;
+        const status = code === "NO_API_KEY" ? 503 : st >= 400 && st < 600 ? st : 502;
+        return res.status(status).json({
+          ok: false,
+          error: code || "OPENAI_KNOWLEDGE",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    });
+  });
+
+  app.post("/api/knowledge-pools/search", async (req, res) => {
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({
+        ok: false,
+        error: "NO_API_KEY",
+        message: "Server is missing OPENAI_API_KEY.",
+      });
+    }
+    const poolRaw = req.body?.pool ?? req.body?.name;
+    const pool = sanitizeKnowledgePoolName(poolRaw);
+    if (!pool) {
+      return res.status(400).json({ ok: false, error: "invalid_pool", message: "Missing or invalid pool name." });
+    }
+    const query = req.body?.query ?? req.body?.q;
+    const maxResults = req.body?.max_results ?? req.body?.maxResults;
+    try {
+      const out = await searchKnowledgePool(pool, String(query ?? ""), {
+        maxResults: maxResults != null ? Number(maxResults) : undefined,
+      });
+      return res.status(out.ok ? 200 : 400).json(out);
+    } catch (e) {
+      const st = typeof e.status === "number" ? e.status : NaN;
+      const status = st >= 400 && st < 600 ? st : 502;
+      return res.status(status).json({
+        ok: false,
+        error: /** @type {{ code?: string }} */ (e).code || "OPENAI_KNOWLEDGE",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
   app.post("/api/plan/validate", (req, res) => {
     const result = validatePlan(req.body);
     if (!result.ok) {
@@ -89,6 +210,32 @@ export function createApp(opts) {
     const result = validatePlan(planBody);
     if (!result.ok) {
       return res.status(400).json({ valid: false, errors: result.errors });
+    }
+    if (planHasVectorDb(result.plan)) {
+      const pool = resolveKnowledgePoolName(result.plan);
+      if (!pool) {
+        return res.status(400).json({
+          valid: false,
+          errors: [
+            {
+              code: "KNOWLEDGE_POOL",
+              message: "Knowledge module needs a valid pool name (letters, digits, hyphen, underscore).",
+            },
+          ],
+        });
+      }
+      const summary = getKnowledgePoolSummary(pool);
+      if (!summary.ok || !summary.ready) {
+        return res.status(400).json({
+          valid: false,
+          errors: [
+            {
+              code: "KNOWLEDGE_POOL_NOT_READY",
+              message: `Knowledge pool "${pool}" has no indexed files. Upload documents in the vector-db module first.`,
+            },
+          ],
+        });
+      }
     }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(503).json({
@@ -131,6 +278,10 @@ export function createApp(opts) {
       if (planHasLogAnalyzer(result.plan)) {
         const pool = resolveAnalyzerPoolName(result.plan);
         if (pool) payload.log_pool_name = pool;
+      }
+      if (planHasVectorDb(result.plan)) {
+        const pool = resolveKnowledgePoolName(result.plan);
+        if (pool) payload.knowledge_pool_name = pool;
       }
       return res.json(payload);
     } catch (e) {

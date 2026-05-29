@@ -169,6 +169,35 @@ describe("buildRealtimePostConnectSession", () => {
     delete process.env.WORKSHOP_LOG_POOLS_DIR;
   });
 
+  it("registers workshop_knowledge_search when vector-db pool is ready", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-vs-tools-"));
+    process.env.WORKSHOP_KNOWLEDGE_POOLS_DIR = tmpDir;
+    const poolDir = path.join(tmpDir, "kb");
+    fs.mkdirSync(poolDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(poolDir, "manifest.json"),
+      JSON.stringify({
+        name: "kb",
+        vector_store_id: "vs_kb_1",
+        created_at: "2026-01-01T00:00:00.000Z",
+        files: [{ filename: "doc.pdf", status: "completed" }],
+      }),
+    );
+
+    const session = buildRealtimePostConnectSession({
+      blocks: [
+        { role: "process", typeId: "vector-db", values: { knowledgePool: "kb" } },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    const names = session.tools?.map((t) => t.name) ?? [];
+    expect(names).toContain("workshop_knowledge_search");
+    expect(session.tools?.every((t) => t.type === "function")).toBe(true);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.WORKSHOP_KNOWLEDGE_POOLS_DIR;
+  });
+
   it("registers mock tooling + dynamic UI tools when session ids are present on the plan", () => {
     const session = buildRealtimePostConnectSession({
       version: 1,

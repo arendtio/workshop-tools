@@ -3,6 +3,7 @@
  * post-connect client events (OpenAI Realtime client event shapes).
  */
 
+import { getKnowledgePoolSummary, resolveKnowledgePoolName } from "./knowledgePools/store.js";
 import { getLogPoolSummary, logPoolExists, resolveAnalyzerPoolName } from "./logPools/store.js";
 
 const SKILL_SNIPPETS = {
@@ -122,22 +123,29 @@ export function buildFullRealtimeInstructions(plan) {
 
   const vector = plan.blocks.find((b) => b.role === "process" && b.typeId === "vector-db");
   if (vector) {
-    const names = String(vector.values?.knowledgeFiles ?? "").trim();
-    const excerpt = String(vector.values?.knowledgeInlineExcerpt ?? "").trim();
-    if (names || excerpt) {
-      const lines = [];
-      if (names) lines.push(`Knowledge / retrieval: participants chose file name(s) in the UI: "${names}".`);
-      if (excerpt) {
-        lines.push(
-          "Plain-text excerpt inlined from those uploads for this session (browser-side; not a real vector index):",
-          excerpt,
-        );
-      } else if (names) {
-        lines.push(
-          "In production your backend would index bytes into a vector store and expose file_search; this session has no text excerpt yet (use a .txt / .md upload in the workbench).",
+    const pool = resolveKnowledgePoolName(plan);
+    const summary = pool ? getKnowledgePoolSummary(pool) : null;
+    if (pool && summary?.ok) {
+      const fileNames = (summary.files || []).map((f) => f.filename).join(", ");
+      const lines = [
+        "## Workshop: knowledge base (vector retrieval)",
+        "",
+        `Knowledge pool: \`${pool}\`${summary.vector_store_id ? ` · OpenAI vector store \`${summary.vector_store_id}\`` : ""}.`,
+        summary.ready
+          ? `Indexed files (${summary.files?.length ?? 0}): ${fileNames || "(none)"}.`
+          : "Pool exists but has **no indexed files yet** — upload documents in the workbench before Run.",
+        "",
+        "For factual answers grounded in these documents, **must** call `workshop_knowledge_search` with a natural-language query before answering.",
+        "Do not invent content that should come from the knowledge base. Cite filenames when quoting.",
+      ];
+      parts.push(lines.join("\n"));
+    } else {
+      const legacyNames = String(vector.values?.knowledgeFiles ?? "").trim();
+      if (legacyNames) {
+        parts.push(
+          `Knowledge module configured but pool name is missing or invalid. Set **Wissens-Topf** and upload files before Run. (Legacy filename stub: "${legacyNames}".)`,
         );
       }
-      parts.push(lines.join("\n"));
     }
   }
 

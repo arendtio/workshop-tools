@@ -6,6 +6,11 @@ import {
   planHasLogAnalyzer,
   planHasLogGenerator,
 } from "./logPoolTools.js";
+import { buildWorkshopKnowledgeSearchTool, planHasVectorDb } from "./knowledgePoolTools.js";
+import {
+  getKnowledgePoolSummary,
+  resolveKnowledgePoolName,
+} from "./knowledgePools/store.js";
 import { logPoolExists, resolveAnalyzerPoolName } from "./logPools/store.js";
 
 /**
@@ -204,6 +209,15 @@ export function buildWorkshopRealtimeTools(plan) {
     const pool = resolveAnalyzerPoolName(plan);
     if (pool && logPoolExists(pool)) {
       tools.push(buildWorkshopLogSqlTool(pool));
+    }
+  }
+  if (planHasVectorDb(plan)) {
+    const pool = resolveKnowledgePoolName(plan);
+    if (pool) {
+      const summary = getKnowledgePoolSummary(pool);
+      if (summary.ok && summary.ready && summary.vector_store_id) {
+        tools.push(buildWorkshopKnowledgeSearchTool(pool, summary.vector_store_id));
+      }
     }
   }
   return tools;

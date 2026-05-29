@@ -23,6 +23,57 @@ describe("HTTP API", () => {
     expect(Array.isArray(res.body.pools)).toBe(true);
   });
 
+  it("GET /api/knowledge-pools lists empty or existing pools", async () => {
+    const app = createApp({ staticRoot });
+    const res = await request(app).get("/api/knowledge-pools");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.pools)).toBe(true);
+  });
+
+  it("POST /api/knowledge-pools/search requires API key", async () => {
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/knowledge-pools/search")
+      .send({ pool: "demo", query: "test" });
+    expect(res.status).toBe(503);
+  });
+
+  it("POST /api/knowledge-pools/upload accepts multipart file", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        const u = String(url);
+        if (u.includes("/vector_stores") && init?.method === "POST" && !u.includes("/search") && !u.includes("/files")) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: "vs_http_1" }) };
+        }
+        if (u.includes("/files") && init?.method === "POST") {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: "file_http_1" }) };
+        }
+        if (u.includes("/vector_stores/vs_http_1/files") && init?.method === "POST") {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: "file_http_1", status: "in_progress" }) };
+        }
+        if (u.includes("/vector_stores/vs_http_1/files/file_http_1") && (!init?.method || init.method === "GET")) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: "file_http_1", status: "completed" }) };
+        }
+        if (u.includes("/vector_stores/vs_http_1/files/file_http_1") && init?.method === "DELETE") {
+          return { ok: true, status: 200, text: async () => "{}" };
+        }
+        return { ok: false, status: 404, text: async () => "not found" };
+      }),
+    );
+
+    const app = createApp({ staticRoot });
+    const res = await request(app)
+      .post("/api/knowledge-pools/upload")
+      .field("pool", "http-upload")
+      .attach("file", Buffer.from("hello knowledge"), "notes.txt");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.filename).toBe("notes.txt");
+  });
+
   it("GET /api/health", async () => {
     const app = createApp({ staticRoot });
     const res = await request(app).get("/api/health");

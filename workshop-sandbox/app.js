@@ -382,24 +382,30 @@ const FORM_SCHEMA = {
   },
   "process:vector-db": {
     apiMapping:
-      "Upload files → Vector store + `file_search` (`vector_store_ids`) in the Responses API. End users only pick files; indexing stays server-side.",
+      "Upload files → server persists under `data/knowledge-pools/` and indexes into an OpenAI Vector Store. Realtime run exposes `workshop_knowledge_search` (semantic search over the pool).",
     defaults: {
-      knowledgeFiles: "",
-      knowledgeInlineExcerpt: "",
+      knowledgePool: "workshop-knowledge",
+      knowledgeFileList: "",
     },
     fields: [
+      {
+        key: "knowledgePool",
+        label: "Wissens-Topf",
+        type: "knowledge_pool_select",
+      },
       {
         key: "knowledgeFiles",
         label: "Knowledge files",
         type: "dropzone",
-        accept: ".pdf,.txt,.md,.markdown,.doc,.docx,.html,.csv,.png,.jpg,.jpeg,.webp,.gif",
-        dropLabel: "Drop one or more files (PDF, text, Office, images …)",
+        accept: ".pdf,.txt,.md,.markdown,.html,.htm,.csv,.doc,.docx,.json,.png,.jpg,.jpeg,.webp,.gif",
+        dropLabel: "Drop files to index (PDF, text, Office, HTML, CSV …)",
+        multiple: true,
       },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Plain-text uploads (.txt, .md, …) embed an excerpt into session instructions; binary files still send filenames only.",
+        hint: "Dateien werden serverseitig hochgeladen und in einen OpenAI Vector Store indexiert (Chunking/Embeddings dort). Max. 50 MB pro Datei. Gleicher Dateiname im Topf wird überschrieben. Topfs unter data/knowledge-pools/ (optional Docker-Volume). Vor Run mindestens eine indexierte Datei.",
       },
     ],
   },
@@ -720,10 +726,15 @@ function pipelineHasLiveAudioInput() {
   return state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
 }
 
+/** Streamed speech on the Realtime WebRTC audio track (output:audio-live only). */
+function pipelineWantsRealtimeAudioOutput() {
+  return state.blocks.some((b) => b.role === "output" && b.typeId === "audio-live");
+}
+
 const REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS = 12_000_000;
 
-/** Max characters read from a text file into `process:vector-db` values (plan + instructions). */
-const VECTOR_KNOWLEDGE_INLINE_MAX_CHARS = 120_000;
+/** Max knowledge file size (multipart upload; matches server). */
+const KNOWLEDGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Guard for `input_image` data URLs on the Realtime data channel (character count incl. prefix). */
 const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
@@ -1474,11 +1485,23 @@ async function startRealtimeRun() {
     const pc = new RTCPeerConnection({ iceServers: REALTIME_WEBRTC_ICE_SERVERS });
     realtimePeerConnection = pc;
 
-    const remoteAudio = document.createElement("audio");
-    remoteAudio.autoplay = true;
-    pc.ontrack = (ev) => {
-      remoteAudio.srcObject = ev.streams[0];
-    };
+    const wantsAudioOut = pipelineWantsRealtimeAudioOutput();
+    if (wantsAudioOut) {
+      const remoteAudio = document.createElement("audio");
+      remoteAudio.autoplay = true;
+      pc.ontrack = (ev) => {
+        remoteAudio.srcObject = ev.streams[0];
+      };
+    } else {
+      // WebRTC SDP still needs an audio m-line; mute remote playback for text-only output pipelines.
+      pc.ontrack = (ev) => {
+        for (const stream of ev.streams) {
+          stream.getTracks().forEach((track) => {
+            track.enabled = false;
+          });
+        }
+      };
+    }
 
     if (state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live")) {
       realtimeLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1499,15 +1522,12 @@ async function startRealtimeRun() {
     realtimeDataChannel = dc;
     let postConnectFlushed = false;
     let sessionCreatedReceived = false;
+    let sessionUpdatedReceived = false;
+    let postConnectSessionSent = false;
 
-    const flushPostConnect = () => {
-      if (postConnectFlushed || !sessionCreatedReceived || dc.readyState !== "open") return;
+    const beginBootstrapAndMaybeRespond = () => {
+      if (postConnectFlushed || !sessionUpdatedReceived || dc.readyState !== "open") return;
       postConnectFlushed = true;
-      try {
-        dc.send(JSON.stringify({ type: "session.update", session: postConnectSession }));
-      } catch (err) {
-        console.warn("Realtime session.update send failed", err);
-      }
       void (async () => {
         try {
           await mergeRealtimeBootstrapUserItems(dc, bootstrapEvents);
@@ -1527,6 +1547,22 @@ async function startRealtimeRun() {
       })();
     };
 
+    const sendPostConnectSessionUpdate = () => {
+      if (postConnectSessionSent || dc.readyState !== "open") return;
+      postConnectSessionSent = true;
+      try {
+        dc.send(JSON.stringify({ type: "session.update", session: postConnectSession }));
+      } catch (err) {
+        console.warn("Realtime session.update send failed", err);
+      }
+    };
+
+    const flushPostConnect = () => {
+      if (!sessionCreatedReceived || dc.readyState !== "open") return;
+      sendPostConnectSessionUpdate();
+      beginBootstrapAndMaybeRespond();
+    };
+
     dc.addEventListener("open", () => {
       flushPostConnect();
     });
@@ -1541,6 +1577,10 @@ async function startRealtimeRun() {
       if (msg && msg.type === "session.created") {
         sessionCreatedReceived = true;
         flushPostConnect();
+      }
+      if (msg && msg.type === "session.updated") {
+        sessionUpdatedReceived = true;
+        beginBootstrapAndMaybeRespond();
       }
       handleRealtimeDataChannelMessage(ev.data);
     });
@@ -2257,28 +2297,54 @@ function renderHintField(field, wrap) {
  * @param {{ values: Record<string, string> }} block
  * @param {File} file
  */
-async function ingestVectorKnowledgeFile(block, file) {
-  const ext = (file.name.split(".").pop() || "").toLowerCase();
-  const textish = ["txt", "md", "markdown", "csv", "json", "html", "htm"].includes(ext);
-  block.values.knowledgeFiles = file.name;
-  if (!textish) {
-    block.values.knowledgeInlineExcerpt = "";
-    showToast(
-      "Embedding: only plain-text types (.txt, .md, .csv, …) are inlined; the filename still appears in instructions.",
-    );
-    renderAll();
+async function uploadVectorKnowledgeFile(block, file) {
+  const pool = String(block.values.knowledgePool || "workshop-knowledge").trim();
+  if (!pool) {
+    showToast("Set a Wissens-Topf name before uploading.");
     return;
   }
+  if (file.size > KNOWLEDGE_UPLOAD_MAX_BYTES) {
+    showToast(`File too large (max ${Math.round(KNOWLEDGE_UPLOAD_MAX_BYTES / (1024 * 1024))} MB).`);
+    return;
+  }
+  showToast(`Indexing ${file.name} into "${pool}"…`);
   try {
-    const t = await file.text();
-    block.values.knowledgeInlineExcerpt =
-      t.length > VECTOR_KNOWLEDGE_INLINE_MAX_CHARS ? t.slice(0, VECTOR_KNOWLEDGE_INLINE_MAX_CHARS) : t;
-    showToast(`Knowledge: embedded ${block.values.knowledgeInlineExcerpt.length} characters from ${file.name}.`);
-  } catch {
-    block.values.knowledgeInlineExcerpt = "";
-    showToast("Could not read file for excerpt.");
+    const form = new FormData();
+    form.append("pool", pool);
+    form.append("file", file, file.name);
+    const res = await fetch("/api/knowledge-pools/upload", {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      showToast(data.message || data.error || `Upload failed (${res.status})`);
+      return;
+    }
+    const list = String(block.values.knowledgeFileList || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const name = String(data.filename || file.name);
+    if (!list.includes(name)) list.push(name);
+    block.values.knowledgeFileList = list.join(", ");
+    block.values.knowledgeFiles = block.values.knowledgeFileList;
+    showToast(`Indexed ${name} (${data.indexed_count ?? "?"} files in pool).`);
+  } catch (e) {
+    showToast(`Upload failed: ${String(/** @type {Error} */ (e).message || e)}`);
   }
   renderAll();
+}
+
+/**
+ * @param {{ values: Record<string, string> }} block
+ * @param {FileList | File[]} files
+ */
+async function ingestVectorKnowledgeFiles(block, files) {
+  const arr = [...files];
+  for (const f of arr) {
+    await uploadVectorKnowledgeFile(block, f);
+  }
 }
 
 function renderDropzoneField(field, block, disabled, wrap) {
@@ -2294,33 +2360,44 @@ function renderDropzoneField(field, block, disabled, wrap) {
 
   const sub = document.createElement("div");
   sub.className = "dropzone-sub";
-  const excerpt =
+  const pool =
     block.role === "process" && block.typeId === "vector-db"
-      ? String(values.knowledgeInlineExcerpt || "").trim()
+      ? String(values.knowledgePool || "").trim()
       : "";
-  const name = values[field.key] || "";
+  const fileList =
+    block.role === "process" && block.typeId === "vector-db"
+      ? String(values.knowledgeFileList || values.knowledgeFiles || "").trim()
+      : "";
+  const name = values[field.key] || fileList || "";
   sub.textContent = name
-    ? excerpt
-      ? `Selected: ${name} · ${excerpt.length} chars embedded`
+    ? pool
+      ? `Pool "${pool}": ${name}`
       : `Selected: ${name}`
-    : "No file selected";
+    : pool
+      ? `Pool "${pool}" — drop files to index`
+      : "No file selected";
   zone.appendChild(sub);
 
   const inp = document.createElement("input");
   inp.type = "file";
   inp.className = "dropzone-input";
   if (field.accept) inp.accept = field.accept;
+  if (field.multiple) inp.multiple = true;
   inp.disabled = disabled;
   inp.addEventListener("change", () => {
-    const f = inp.files && inp.files[0];
+    const fl = inp.files;
+    const f = fl && fl[0];
+    if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
+      if (fl && fl.length) void ingestVectorKnowledgeFiles(block, fl);
+      else {
+        values.knowledgeFileList = "";
+        values.knowledgeFiles = "";
+      }
+      inp.value = "";
+      return;
+    }
     values[field.key] = f ? f.name : "";
     sub.textContent = f ? `Selected: ${f.name}` : "No file selected";
-    if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
-      if (f) void ingestVectorKnowledgeFile(block, f);
-      else {
-        values.knowledgeInlineExcerpt = "";
-      }
-    }
     if (block.typeId === "audio-rec") {
       block._recordedAudioBlob = f || null;
     }
@@ -2352,12 +2429,14 @@ function renderDropzoneField(field, block, disabled, wrap) {
     highlight(false);
     if (disabled) return;
     const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    const fl = e.dataTransfer && e.dataTransfer.files;
+    if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
+      if (fl && fl.length) void ingestVectorKnowledgeFiles(block, fl);
+      return;
+    }
     if (f) {
       values[field.key] = f.name;
       sub.textContent = `Selected: ${f.name}`;
-      if (block.role === "process" && block.typeId === "vector-db" && field.key === "knowledgeFiles") {
-        void ingestVectorKnowledgeFile(block, f);
-      }
       if (block.typeId === "audio-rec") {
         block._recordedAudioBlob = f;
       }
@@ -2394,6 +2473,89 @@ function renderSegmentedField(field, block, disabled, wrap) {
     bar.appendChild(b);
   });
   wrap.appendChild(bar);
+}
+
+async function fillKnowledgePoolSelect(selectEl, textInput) {
+  const preserve = textInput ? textInput.value : selectEl.value;
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "— Topf wählen —";
+  selectEl.innerHTML = "";
+  selectEl.appendChild(empty);
+  try {
+    const res = await fetch("/api/knowledge-pools");
+    const data = await res.json().catch(() => ({}));
+    const pools = data.ok && Array.isArray(data.pools) ? data.pools : [];
+    pools.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = String(p.name || "");
+      const n = p.indexed_count != null ? ` · ${p.indexed_count} indexed` : "";
+      const ready = p.ready ? " ✓" : "";
+      o.textContent = `${p.name}${n}${ready}`;
+      selectEl.appendChild(o);
+    });
+    if (!pools.length) {
+      const none = document.createElement("option");
+      none.value = "";
+      none.disabled = true;
+      none.textContent = "(noch keine Topfs — Name tippen & Datei hochladen)";
+      selectEl.appendChild(none);
+    }
+  } catch {
+    const err = document.createElement("option");
+    err.value = "";
+    err.disabled = true;
+    err.textContent = "(Liste nicht geladen)";
+    selectEl.appendChild(err);
+  }
+  if (preserve && [...selectEl.options].some((o) => o.value === preserve)) {
+    selectEl.value = preserve;
+  }
+}
+
+function renderKnowledgePoolSelectField(field, block, locked, wrap) {
+  const row = document.createElement("div");
+  row.className = "media-device-row";
+
+  const textInp = document.createElement("input");
+  textInp.type = "text";
+  textInp.disabled = locked;
+  textInp.placeholder = "workshop-knowledge";
+  textInp.value = String(block.values[field.key] || "workshop-knowledge");
+  textInp.addEventListener("input", () => {
+    block.values[field.key] = textInp.value.trim();
+  });
+
+  const sel = document.createElement("select");
+  sel.disabled = locked;
+  sel.title = "Bestehenden Topf wählen";
+  sel.addEventListener("change", () => {
+    if (sel.value) {
+      block.values[field.key] = sel.value;
+      textInp.value = sel.value;
+      renderAll();
+    }
+  });
+
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "media-device-refresh";
+  refresh.textContent = "Aktualisieren";
+  refresh.disabled = locked;
+  refresh.addEventListener("click", async () => {
+    await fillKnowledgePoolSelect(sel, textInp);
+    showToast("Wissens-Topf-Liste aktualisiert.");
+  });
+
+  row.appendChild(textInp);
+  row.appendChild(sel);
+  row.appendChild(refresh);
+  wrap.appendChild(row);
+  fillKnowledgePoolSelect(sel, textInp).then(() => {
+    const v = String(block.values[field.key] || "workshop-knowledge").trim();
+    if (v) textInp.value = v;
+    if (v && [...sel.options].some((o) => o.value === v)) sel.value = v;
+  });
 }
 
 async function fillLogPoolSelect(selectEl) {
@@ -2815,9 +2977,13 @@ function gatherConversationSnapshotForTextOutput() {
   }
 
   const know = blocks.find((b) => b.role === "process" && b.typeId === "vector-db");
-  const doc = know && String(know.values.knowledgeFiles || "").trim();
-  if (doc) {
-    systemParts.push({ label: "Knowledge files", body: doc });
+  if (know) {
+    const pool = String(know.values.knowledgePool || "").trim();
+    const files = String(know.values.knowledgeFileList || know.values.knowledgeFiles || "").trim();
+    systemParts.push({
+      label: "Knowledge pool",
+      body: pool ? `${pool}${files ? ` · ${files}` : ""}` : files || "(not configured)",
+    });
   }
 
   const toolBlock = blocks.find((b) => b.role === "process" && b.typeId === "tooling");
@@ -4413,6 +4579,11 @@ function renderModuleCard(block, container) {
       form.appendChild(wrap);
       return;
     }
+    if (field.type === "knowledge_pool_select") {
+      renderKnowledgePoolSelectField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
+    }
     if (field.type === "audio_record") {
       renderAudioRecordField(field, block, locked, wrap);
       form.appendChild(wrap);
@@ -5045,6 +5216,49 @@ async function handleRealtimeResponseDone(msg) {
                 `tool:${callId}:done`,
               );
               outStr = JSON.stringify({ ok: false, error: "sql_fetch_failed" });
+            }
+          }
+        } else if (name === "workshop_knowledge_search") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const knowBlock = state.blocks.find((b) => b.role === "process" && b.typeId === "vector-db");
+          const pool = String(knowBlock?.values?.knowledgePool || "").trim();
+          if (!pool) {
+            outStr = JSON.stringify({ ok: false, error: "no_pool_selected" });
+          } else {
+            appendSystemTranscriptToTextOutputs(
+              "Tool · workshop_knowledge_search",
+              `Query on ${pool}: ${String(args.query || "").slice(0, 500)}`,
+              `tool:${callId}:start`,
+            );
+            try {
+              const res = await fetch("/api/knowledge-pools/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  pool,
+                  query: args.query,
+                  max_results: args.max_results,
+                }),
+              });
+              const data = await res.json().catch(() => ({}));
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_knowledge_search",
+                `Result:\n${JSON.stringify(data, null, 2).slice(0, 6000)}`,
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify(data);
+            } catch (err) {
+              appendSystemTranscriptToTextOutputs(
+                "Tool · workshop_knowledge_search",
+                String(/** @type {Error} */ (err).message || err),
+                `tool:${callId}:done`,
+              );
+              outStr = JSON.stringify({ ok: false, error: "search_fetch_failed" });
             }
           }
         } else if (name === "workshop_mock_tooling_call") {

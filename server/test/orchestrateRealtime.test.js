@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildFullRealtimeInstructions,
@@ -18,13 +21,27 @@ describe("orchestrateRealtime", () => {
   });
 
   it("includes vector and tooling context in instructions", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-orch-"));
+    process.env.WORKSHOP_KNOWLEDGE_POOLS_DIR = tmpDir;
+    const poolDir = path.join(tmpDir, "notes");
+    fs.mkdirSync(poolDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(poolDir, "manifest.json"),
+      JSON.stringify({
+        name: "notes",
+        vector_store_id: "vs_abc",
+        created_at: "2026-01-01T00:00:00.000Z",
+        files: [{ filename: "notes.pdf", status: "completed" }],
+      }),
+    );
+
     const text = buildFullRealtimeInstructions({
       blocks: [
         { role: "process", typeId: "instruction", values: { system: "Base" } },
         {
           role: "process",
           typeId: "vector-db",
-          values: { knowledgeFiles: "notes.pdf", knowledgeInlineExcerpt: "alpha\nbeta" },
+          values: { knowledgePool: "notes", knowledgeFileList: "notes.pdf" },
         },
         {
           role: "process",
@@ -34,9 +51,13 @@ describe("orchestrateRealtime", () => {
         { role: "output", typeId: "text", values: {} },
       ],
     });
+    expect(text).toContain("notes");
     expect(text).toContain("notes.pdf");
-    expect(text).toContain("alpha");
+    expect(text).toContain("workshop_knowledge_search");
     expect(text).toContain("Auftragsdaten");
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.WORKSHOP_KNOWLEDGE_POOLS_DIR;
   });
 
   it("creates one bootstrap user item per non-live input in pipeline order", () => {
