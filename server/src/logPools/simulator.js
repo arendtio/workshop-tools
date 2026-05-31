@@ -45,11 +45,62 @@ function pickPackagePath(errorPathPercent, rng01) {
 }
 
 /**
+ * @typedef {import("./toolingRefs.js").ToolingLogRefs} ToolingLogRefs
+ */
+
+/**
+ * @param {ToolingLogRefs | null | undefined} refs
+ * @param {() => number} rng01
+ */
+function pickShopNumber(refs, rng01) {
+  if (refs?.shops?.length) {
+    return refs.shops[Math.floor(rng01() * refs.shops.length)].number;
+  }
+  return String(1000 + Math.floor(rng01() * 1001));
+}
+
+/**
+ * @param {ToolingLogRefs | null | undefined} refs
+ * @param {() => number} rng01
+ */
+function pickProductId(refs, rng01) {
+  if (refs?.products?.length) {
+    const p = refs.products[Math.floor(rng01() * refs.products.length)];
+    return p.id || p.sku;
+  }
+  return "SKU-100001";
+}
+
+/**
+ * @param {ToolingLogRefs | null | undefined} refs
+ * @param {() => number} rng01
+ * @param {string} fallbackShop
+ */
+function pickOrderContext(refs, rng01, fallbackShop) {
+  if (refs?.orders?.length) {
+    const o = refs.orders[Math.floor(rng01() * refs.orders.length)];
+    return {
+      order_id: o.id,
+      customer_id: o.customer_id,
+      shop_id: o.shop_id || fallbackShop,
+      product_id: o.product_id || pickProductId(refs, rng01),
+    };
+  }
+  return {
+    order_id: "ord-0000001",
+    customer_id: "cust-000001",
+    shop_id: fallbackShop,
+    product_id: pickProductId(refs, rng01),
+  };
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.scenarioPreset
  * @param {number} [opts.errorPathPercent]
  * @param {number} [opts.seed]
  * @param {number} [opts.targetBytes]
+ * @param {ToolingLogRefs | null} [opts.toolingRefs]
  * @param {(rows: object[]) => void} opts.onBatch
  * @returns {{ rowCount: number, seed: number, config: object }}
  */
@@ -74,12 +125,20 @@ export function simulateLogEvents(opts) {
   let packageSeq = 0;
   let clockMs = Date.UTC(2026, 4, 1, 6, 0, 0);
 
+  const refs = opts.toolingRefs ?? null;
   const config = {
     scenario_preset: opts.scenarioPreset || "shop-package-lifecycle",
     error_path_percent: errorPathPercent,
     seed,
     target_bytes: targetBytes,
     message_keys: preset.messages.map((m) => m.message_key),
+    tooling_refs: refs
+      ? {
+          shops: refs.shops.length,
+          orders: refs.orders.length,
+          products: refs.products.length,
+        }
+      : null,
   };
 
   /** @type {object[]} */
@@ -105,8 +164,15 @@ export function simulateLogEvents(opts) {
   while (approxBytes < targetBytes) {
     packageSeq += 1;
     const packageId = `PKG-${100000 + packageSeq}`;
-    const shopId = `SHOP-${1 + Math.floor(rng01() * 24)}`;
-    const params = { package_id: packageId, shop_id: shopId };
+    const shopId = pickShopNumber(refs, rng01);
+    const ctx = pickOrderContext(refs, rng01, shopId);
+    const params = {
+      package_id: packageId,
+      shop_id: ctx.shop_id,
+      order_id: ctx.order_id,
+      customer_id: ctx.customer_id,
+      product_id: ctx.product_id || pickProductId(refs, rng01),
+    };
     const path = pickPackagePath(errorPathPercent, rng01);
 
     push("delivery.arrived", params, packageId);

@@ -5,45 +5,50 @@ export const SHOP_PACKAGE_LIFECYCLE_MESSAGES = [
   {
     message_key: "delivery.arrived",
     priority: "info",
-    template: "Paket {package_id} im Shop {shop_id} eingetroffen.",
-    params: ["package_id", "shop_id"],
+    template:
+      "Paket {package_id} für Auftrag {order_id} (Kunde {customer_id}) im Shop {shop_id} eingetroffen.",
+    params: ["package_id", "shop_id", "order_id"],
   },
   {
     message_key: "warehouse.goods_receipt.booked",
     priority: "info",
-    template: "Wareneingang gebucht für Paket {package_id} in Shop {shop_id}.",
-    params: ["package_id", "shop_id"],
+    template:
+      "Wareneingang gebucht: Paket {package_id}, Artikel {product_id}, Shop {shop_id}, Auftrag {order_id}.",
+    params: ["package_id", "product_id", "shop_id"],
   },
   {
     message_key: "warehouse.package.scanned",
     priority: "info",
-    template: "Paket {package_id} in Shop {shop_id} gescannt.",
-    params: ["package_id", "shop_id"],
+    template: "Paket {package_id} (Auftrag {order_id}) in Shop {shop_id} gescannt.",
+    params: ["package_id", "shop_id", "order_id"],
   },
   {
     message_key: "pickup.completed",
     priority: "info",
-    template: "Paket {package_id} in Shop {shop_id} als abgeholt markiert.",
-    params: ["package_id", "shop_id"],
+    template:
+      "Paket {package_id} für Kunde {customer_id} (Auftrag {order_id}) in Shop {shop_id} abgeholt.",
+    params: ["package_id", "customer_id", "order_id"],
   },
   {
     message_key: "warehouse.scan.rejected_no_receipt",
     priority: "error",
-    template: "Scan abgelehnt: Paket {package_id} — kein Wareneingang in Shop {shop_id}.",
-    params: ["package_id", "shop_id"],
+    template:
+      "Scan abgelehnt: Paket {package_id}, Auftrag {order_id} — kein Wareneingang in Shop {shop_id}.",
+    params: ["package_id", "shop_id", "order_id"],
   },
   {
     message_key: "warehouse.receipt.rejected_not_released",
     priority: "error",
     template:
-      "Wareneingang abgelehnt: Paket {package_id} in Shop {shop_id} — Packstück noch nicht zur Buchung freigegeben.",
-    params: ["package_id", "shop_id"],
+      "Wareneingang abgelehnt: Paket {package_id}, Auftrag {order_id} in Shop {shop_id} — noch nicht freigegeben.",
+    params: ["package_id", "shop_id", "order_id"],
   },
   {
     message_key: "warehouse.goods_receipt.blocked_inventory",
     priority: "blocker",
-    template: "Blocker: Inventur-Sperre für Shop {shop_id}, Paket {package_id} nicht buchbar.",
-    params: ["shop_id", "package_id"],
+    template:
+      "Blocker: Inventur-Sperre Shop {shop_id}, Paket {package_id} (Auftrag {order_id}) nicht buchbar.",
+    params: ["shop_id", "package_id", "order_id"],
   },
 ];
 

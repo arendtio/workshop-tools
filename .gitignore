@@ -1,3 +1,17 @@
+# Dependencies
 server/node_modules/
-data/log-pools/*.sqlite
-data/log-pools/*.sqlite-journal
+
+# Local secrets (use env vars or OPENAI_API_KEY_FILE in production)
+.env
+.env.*
+!.env.example
+
+# Runtime workshop data (mount these dirs in Docker; see AGENTS.md)
+data/log-pools/*
+!data/log-pools/.gitkeep
+
+data/knowledge-pools/*
+!data/knowledge-pools/.gitkeep
+
+data/tooling-mock/*
+!data/tooling-mock/.gitkeep

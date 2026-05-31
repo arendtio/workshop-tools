@@ -19,7 +19,8 @@ export function buildWorkshopLogPoolGenerateTool() {
     description:
       "Create or **overwrite** a workshop log pool (SQLite on the server, typically ~10 MB — too large for context). " +
       "Use after the participant asks you to generate a business log. Returns metadata only (row count, size, message keys), never full log rows. " +
-      "Scenario `shop-package-lifecycle` simulates shop delivery, goods receipt, scan, pickup, and error paths with consistent message templates.",
+      "Scenario `shop-package-lifecycle` simulates shop delivery, goods receipt, scan, pickup, and error paths. " +
+      "Shop numbers (1000–2000), order ids, customer ids, and product ids are taken from the shared tooling mock database when available.",
     parameters: {
       type: "object",
       properties: {

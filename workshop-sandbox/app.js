@@ -205,6 +205,92 @@ const blockMediaRecorders = new Map();
 /** Push-to-talk toggle: block id → mic unmuted (Realtime: syncs to track.enabled). */
 const audioLivePttToggleState = new Map();
 
+/** @type {{ id: string, label: string }[]} */
+const TOOLING_SERVICES = [
+  { id: "customers", label: "Kundendaten" },
+  { id: "orders", label: "Auftragsdaten" },
+  { id: "shop", label: "Shop" },
+  { id: "products", label: "Produktdaten" },
+  { id: "inventory", label: "Lager / Bestand" },
+  { id: "other", label: "Sonstiges" },
+];
+
+/** @param {string} domain @param {"read" | "write"} kind */
+function toolingSvcKey(domain, kind) {
+  return `svc_${domain}_${kind}`;
+}
+
+/** @param {unknown} v */
+function isToolingFlagOn(v) {
+  return v === "1" || v === "true";
+}
+
+/** @param {Record<string, string>} values */
+function migrateLegacyToolingValues(values) {
+  const v = { ...values };
+  if (Object.keys(v).some((k) => k.startsWith("svc_"))) return v;
+  const mode = String(v.accessMode || "").trim() || "read";
+  const dom = String(v.serviceDomain || "").trim() || "customers";
+  const write = mode === "write";
+  for (const s of TOOLING_SERVICES) {
+    v[toolingSvcKey(s.id, "read")] = "0";
+    v[toolingSvcKey(s.id, "write")] = "0";
+  }
+  const targets =
+    dom === "shop" ? ["shop", "products"] : TOOLING_SERVICES.some((s) => s.id === dom) ? [dom] : [];
+  for (const id of targets) {
+    v[toolingSvcKey(id, "read")] = "1";
+    if (write) v[toolingSvcKey(id, "write")] = "1";
+  }
+  return v;
+}
+
+/** @param {{ values?: Record<string, string> }} block */
+function ensureToolingBlockValues(block) {
+  if (!block.values) block.values = {};
+  const next = migrateLegacyToolingValues(block.values);
+  for (const [k, val] of Object.entries(next)) block.values[k] = val;
+}
+
+/** @param {Record<string, string>} values */
+function formatToolingAccessSummary(values) {
+  const v = migrateLegacyToolingValues(values);
+  const lines = [];
+  for (const s of TOOLING_SERVICES) {
+    const write = isToolingFlagOn(v[toolingSvcKey(s.id, "write")]);
+    const read = write || isToolingFlagOn(v[toolingSvcKey(s.id, "read")]);
+    if (!read && !write) continue;
+    const mode = write ? "Lesen + Schreiben" : "nur Lesen";
+    let filters = "";
+    if (s.id === "customers") {
+      filters =
+        " · Suche: filter.first_name + filter.last_name, name_contains, zip, ort, customer_id, sample";
+    } else if (s.id === "orders") {
+      filters = " · filter u. a. customer_id, status, total_min/max, product_id, sample";
+    } else if (s.id === "shop") {
+      filters = " · filter u. a. number, region, status, sample";
+    } else if (s.id === "products") {
+      filters = " · filter u. a. category, sku, title_contains, sample";
+    } else if (s.id === "inventory") {
+      filters = " · filter u. a. product_id, warehouse, sample";
+    }
+    lines.push(`- ${s.label} (${s.id}): ${mode}${filters}`);
+  }
+  return lines.length
+    ? lines.join("\n")
+    : "(kein Service ausgewählt — Checkboxen im Tooling-Modul setzen)";
+}
+
+function toolingAccessDefaults() {
+  /** @type {Record<string, string>} */
+  const d = {};
+  for (const s of TOOLING_SERVICES) {
+    d[toolingSvcKey(s.id, "read")] = s.id === "customers" ? "1" : "0";
+    d[toolingSvcKey(s.id, "write")] = "0";
+  }
+  return d;
+}
+
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
  * Field objects: type is one of text, textarea, number, select, segmented, dropzone, hint,
@@ -412,37 +498,24 @@ const FORM_SCHEMA = {
   "process:tooling": {
     apiMapping:
       "Maps to Responses / Chat function tools or bespoke connectors server-side — this card holds workshop selections only.",
-    defaults: {
-      accessMode: "read",
-      serviceDomain: "customers",
-    },
+    defaults: toolingAccessDefaults(),
     fields: [
       {
-        key: "accessMode",
-        label: "Vorgang",
-        type: "select",
-        options: [
-          { value: "read", label: "Daten lesen" },
-          { value: "write", label: "Daten schreiben" },
-        ],
+        key: "_toolingGrid",
+        label: "Datenzugriff",
+        type: "tooling_access",
+        services: TOOLING_SERVICES,
       },
       {
-        key: "serviceDomain",
-        label: "Service",
-        type: "select",
-        options: [
-          { value: "customers", label: "Kundendaten" },
-          { value: "orders", label: "Auftragsdaten" },
-          { value: "shop", label: "Shop- & Produktdaten" },
-          { value: "inventory", label: "Lager / Bestand" },
-          { value: "other", label: "Sonstiges" },
-        ],
+        key: "_toolingSchema",
+        label: "",
+        type: "tooling_schema",
       },
       {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Mock tool `workshop_mock_tooling_call` + in-memory tables (customers, orders, shop, inventory) persist for each Run; access mode and domain are hints for the model.",
+        hint: "Lesen/Schreiben pro Service. Kunden-ID = cust-…; Suche mit filter.first_name + filter.last_name (auch vorname/nachname). Vorschau: filter.sample=true.",
       },
     ],
   },
@@ -637,8 +710,8 @@ let realtimeLocalStream = null;
 /** @type {RTCDataChannel | null} */
 let realtimeDataChannel = null;
 /**
- * Minted with `/api/realtime/client-secret` — mock tooling DB + dynamic UI widget persistence (this run).
- * @type {{ toolingMockSessionId?: string, dynamicUiSessionId?: string } | null}
+ * Minted with `/api/realtime/client-secret` — persistent mock tooling DB + dynamic UI (this run).
+ * @type {{ toolingMockReady?: boolean, dynamicUiSessionId?: string } | null}
  */
 let workshopSessionIds = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -686,25 +759,41 @@ function uid() {
   return `b-${idSeq}`;
 }
 
+/** @param {{ id: string, formItems?: object[] }} block */
+function collectFormParticipantValuesForBlock(block) {
+  const card = document.querySelector(`[data-block-id="${block.id}"]`);
+  const formEl = card && card.querySelector("form.composer-form-live");
+  if (!formEl) return {};
+  return collectLiveFormAnswersFromDom(formEl, block);
+}
+
 function serializePipelinePlan() {
-  /** @type {{ version: 1, blocks: object[], toolingMockSessionId?: string, dynamicUiSessionId?: string }} */
+  /** @type {{ version: 1, blocks: object[], toolingMockReady?: boolean, dynamicUiSessionId?: string }} */
   const plan = {
     version: 1,
-    blocks: state.blocks.map((b) => ({
-      id: b.id,
-      role: b.role,
-      typeId: b.typeId,
-      values: { ...(b.values || {}) },
-      formItems: Array.isArray(b.formItems) ? b.formItems.map((it) => ({ ...it })) : undefined,
-      dynamicUiCommitted: b.dynamicUiCommitted,
-      dynamicUiOutputSchema:
-        b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object"
-          ? { ...b.dynamicUiOutputSchema }
-          : undefined,
-    })),
+    blocks: state.blocks.map((b) => {
+      /** @type {Record<string, unknown>} */
+      const row = {
+        id: b.id,
+        role: b.role,
+        typeId: b.typeId,
+        values: { ...(b.values || {}) },
+        formItems: Array.isArray(b.formItems) ? b.formItems.map((it) => ({ ...it })) : undefined,
+        dynamicUiCommitted: b.dynamicUiCommitted,
+        dynamicUiOutputSchema:
+          b.dynamicUiOutputSchema && typeof b.dynamicUiOutputSchema === "object"
+            ? { ...b.dynamicUiOutputSchema }
+            : undefined,
+      };
+      if (b.role === "input" && b.typeId === "form") {
+        const fv = collectFormParticipantValuesForBlock(b);
+        if (Object.keys(fv).length) row.formParticipantValues = fv;
+      }
+      return row;
+    }),
   };
-  if (workshopSessionIds?.toolingMockSessionId) {
-    plan.toolingMockSessionId = workshopSessionIds.toolingMockSessionId;
+  if (workshopSessionIds?.toolingMockReady) {
+    plan.toolingMockReady = true;
   }
   if (workshopSessionIds?.dynamicUiSessionId) {
     plan.dynamicUiSessionId = workshopSessionIds.dynamicUiSessionId;
@@ -1302,6 +1391,11 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
       await sendRealtimeAudioRecBlock(dc, b);
       continue;
     }
+    if (b.typeId === "form") {
+      await pushSingleInputModuleToRealtime(dc, b);
+      if (bi < bootstrapEvents.length) bi += 1;
+      continue;
+    }
     if (b.typeId === "image" && String(b.values?.imageSource ?? "file") === "file") {
       await sendRealtimeInputImageBlock(dc, b);
       continue;
@@ -1444,10 +1538,10 @@ async function startRealtimeRun() {
       return;
     }
 
-    if (data.tooling_mock_session_id || data.dynamic_ui_session_id) {
+    if (data.tooling_mock_ready || data.tooling_mock_session_id || data.dynamic_ui_session_id) {
       workshopSessionIds = {};
-      if (data.tooling_mock_session_id) {
-        workshopSessionIds.toolingMockSessionId = String(data.tooling_mock_session_id);
+      if (data.tooling_mock_ready || data.tooling_mock_session_id) {
+        workshopSessionIds.toolingMockReady = true;
       }
       if (data.dynamic_ui_session_id) {
         workshopSessionIds.dynamicUiSessionId = String(data.dynamic_ui_session_id);
@@ -2558,6 +2652,159 @@ function renderKnowledgePoolSelectField(field, block, locked, wrap) {
   });
 }
 
+function renderToolingAccessField(field, block, locked, wrap) {
+  ensureToolingBlockValues(block);
+  const services = field.services || TOOLING_SERVICES;
+
+  const grid = document.createElement("div");
+  grid.className = "tooling-access-grid";
+  grid.setAttribute("role", "group");
+  grid.setAttribute("aria-label", field.label || "Datenzugriff");
+
+  const head = document.createElement("div");
+  head.className = "tooling-access-row tooling-access-head";
+  const hSvc = document.createElement("span");
+  hSvc.className = "tooling-access-svc";
+  hSvc.textContent = "Service";
+  const hRead = document.createElement("span");
+  hRead.className = "tooling-access-col";
+  hRead.textContent = "Lesen";
+  const hWrite = document.createElement("span");
+  hWrite.className = "tooling-access-col";
+  hWrite.textContent = "Schreiben";
+  head.append(hSvc, hRead, hWrite);
+  grid.appendChild(head);
+
+  services.forEach((svc, idx) => {
+    const readKey = toolingSvcKey(svc.id, "read");
+    const writeKey = toolingSvcKey(svc.id, "write");
+
+    const row = document.createElement("div");
+    row.className = "tooling-access-row";
+
+    const name = document.createElement("span");
+    name.className = "tooling-access-svc";
+    name.textContent = svc.label;
+
+    const readCb = document.createElement("input");
+    readCb.type = "checkbox";
+    readCb.id = `tooling-${block.id}-r-${idx}`;
+    readCb.disabled = locked;
+    readCb.checked =
+      isToolingFlagOn(block.values[writeKey]) || isToolingFlagOn(block.values[readKey]);
+
+    const writeCb = document.createElement("input");
+    writeCb.type = "checkbox";
+    writeCb.id = `tooling-${block.id}-w-${idx}`;
+    writeCb.disabled = locked;
+    writeCb.checked = isToolingFlagOn(block.values[writeKey]);
+
+    readCb.addEventListener("change", () => {
+      if (!readCb.checked) {
+        block.values[readKey] = "0";
+        block.values[writeKey] = "0";
+        writeCb.checked = false;
+      } else {
+        block.values[readKey] = "1";
+      }
+    });
+
+    writeCb.addEventListener("change", () => {
+      if (writeCb.checked) {
+        block.values[writeKey] = "1";
+        block.values[readKey] = "1";
+        readCb.checked = true;
+      } else {
+        block.values[writeKey] = "0";
+      }
+    });
+
+    const readLab = document.createElement("label");
+    readLab.className = "tooling-access-col field-checkbox";
+    readLab.htmlFor = readCb.id;
+    readLab.append(readCb, document.createElement("span"));
+
+    const writeLab = document.createElement("label");
+    writeLab.className = "tooling-access-col field-checkbox";
+    writeLab.htmlFor = writeCb.id;
+    writeLab.append(writeCb, document.createElement("span"));
+
+    row.append(name, readLab, writeLab);
+    grid.appendChild(row);
+  });
+
+  wrap.appendChild(grid);
+}
+
+function renderToolingSchemaPanel(wrap) {
+  const box = document.createElement("div");
+  box.className = "tooling-schema-panel";
+  box.textContent = "Datenmodell wird geladen…";
+  wrap.appendChild(box);
+
+  fetch("/api/tooling-mock/schema")
+    .then((r) => r.json())
+    .then((data) => {
+      if (!data.ok || !data.domains) {
+        box.textContent = "Datenmodell nicht verfügbar.";
+        return;
+      }
+      box.textContent = "";
+      const intro = document.createElement("p");
+      intro.className = "field-hint";
+      intro.textContent =
+        "Mock-ERP (SQLite): Kunden ohne Filial-Zuordnung; Shop nur auf Aufträgen. list braucht filter oder sample:true (max. 100 Zeilen).";
+      box.appendChild(intro);
+
+      Object.entries(data.domains).forEach(([domain, schema]) => {
+        const sec = document.createElement("details");
+        sec.className = "tooling-schema-domain";
+        const sum = document.createElement("summary");
+        sum.textContent = `${schema.label || domain} (${domain})`;
+        sec.appendChild(sum);
+        if (schema.idHint) {
+          const p = document.createElement("p");
+          p.className = "field-hint";
+          p.textContent = schema.idHint;
+          sec.appendChild(p);
+        }
+        if (schema.fields?.length) {
+          const ul = document.createElement("ul");
+          ul.className = "tooling-schema-fields";
+          schema.fields.forEach((f) => {
+            const li = document.createElement("li");
+            li.textContent = `${f.name}${f.description ? ` — ${f.description}` : ""}`;
+            ul.appendChild(li);
+          });
+          sec.appendChild(ul);
+        }
+        if (schema.listFilters?.length) {
+          const fl = document.createElement("p");
+          fl.className = "field-hint";
+          fl.textContent = `Filter: ${schema.listFilters.join("; ")}`;
+          sec.appendChild(fl);
+        }
+        box.appendChild(sec);
+      });
+    })
+    .catch(() => {
+      box.textContent = "Datenmodell konnte nicht geladen werden.";
+    });
+}
+
+/** @param {Record<string, unknown>} args */
+function formatToolingMockCallLabel(args) {
+  const domain = String(args.domain || "");
+  const op = String(args.operation || "");
+  const parts = [`${domain} · ${op}`];
+  if (args.filter && typeof args.filter === "object") {
+    parts.push(`filter: ${JSON.stringify(args.filter)}`);
+  }
+  if (args.limit != null) parts.push(`limit: ${args.limit}`);
+  if (args.id) parts.push(`id: ${args.id}`);
+  return parts.join("\n");
+}
+
 async function fillLogPoolSelect(selectEl) {
   const preserve = selectEl.value;
   const empty = document.createElement("option");
@@ -2987,18 +3234,10 @@ function gatherConversationSnapshotForTextOutput() {
   }
 
   const toolBlock = blocks.find((b) => b.role === "process" && b.typeId === "tooling");
-  const toolingSchema = FORM_SCHEMA["process:tooling"];
-  if (toolBlock && toolingSchema) {
-    const optLabel = (fieldKey, value) => {
-      const fld = toolingSchema.fields.find((f) => f.key === fieldKey);
-      const o = fld && fld.options && fld.options.find((x) => x.value === value);
-      return o ? o.label : String(value || "");
-    };
-    const op = optLabel("accessMode", toolBlock.values.accessMode || "read");
-    const dom = optLabel("serviceDomain", toolBlock.values.serviceDomain || "");
+  if (toolBlock) {
     systemParts.push({
       label: "Tooling",
-      body: `${op} · ${dom}`,
+      body: formatToolingAccessSummary(toolBlock.values || {}),
     });
   }
 
@@ -3019,15 +3258,22 @@ function gatherConversationSnapshotForTextOutput() {
         });
       } else if (b.typeId === "form") {
         const items = Array.isArray(b.formItems) ? b.formItems : [];
+        const answers = collectFormParticipantValuesForBlock(b);
         const lines = items.map((it, i) => {
           const optEx = needsFormExtraOptions(it.typ) ? ` (${parseFormOptions(it.options).join("; ")})` : "";
-          return `${i + 1}. [${it.typ}] ${it.label}${optEx}`;
+          const lab = String(it.label || `field_${i}`).trim();
+          const val = answers[lab];
+          const valBit = val != null && String(val).trim() !== "" ? ` → „${String(val).trim()}“` : "";
+          return `${i + 1}. [${it.typ}] ${lab}${optEx}${valBit}`;
         });
         body = lines.length ? lines.join("\n") : "(no fields defined)";
+        if (Object.keys(answers).length) {
+          body += `\n\nWerte (JSON):\n${JSON.stringify(answers, null, 2)}`;
+        }
         userTurns.push({
-          label: `Form blueprint · ${partTitle}`,
+          label: `Formular · ${partTitle}`,
           body,
-          empty: !lines.length,
+          empty: !lines.length && !Object.keys(answers).length,
         });
       } else if (b.typeId === "dynamic-ui") {
         const draft = String(b.values.uiPrompt || "").trim();
@@ -4584,6 +4830,22 @@ function renderModuleCard(block, container) {
       form.appendChild(wrap);
       return;
     }
+    if (field.type === "tooling_access") {
+      if (field.label) {
+        const lab = document.createElement("span");
+        lab.className = "tooling-access-title";
+        lab.textContent = field.label;
+        wrap.appendChild(lab);
+      }
+      renderToolingAccessField(field, block, locked, wrap);
+      form.appendChild(wrap);
+      return;
+    }
+    if (field.type === "tooling_schema") {
+      renderToolingSchemaPanel(wrap);
+      form.appendChild(wrap);
+      return;
+    }
     if (field.type === "audio_record") {
       renderAudioRecordField(field, block, locked, wrap);
       form.appendChild(wrap);
@@ -5268,25 +5530,24 @@ async function handleRealtimeResponseDone(msg) {
           } catch {
             args = {};
           }
-          const sid = workshopSessionIds?.toolingMockSessionId;
-          if (!sid) {
+          if (!workshopSessionIds?.toolingMockReady) {
             appendSystemTranscriptToTextOutputs(
               "Tool · workshop_mock_tooling_call",
-              "No tooling mock session — add process:tooling and restart the run.",
+              "Tooling mock not ready — add process:tooling and restart the run.",
               `tool:${callId}:skip`,
             );
-            outStr = JSON.stringify({ ok: false, error: "no_tooling_session" });
+            outStr = JSON.stringify({ ok: false, error: "no_tooling_mock" });
           } else {
             appendSystemTranscriptToTextOutputs(
               "Tool · workshop_mock_tooling_call",
-              `Calling mock ${String(args.domain || "")} · ${String(args.operation || "")}`,
+              formatToolingMockCallLabel(/** @type {Record<string, unknown>} */ (args)),
               `tool:${callId}:start`,
             );
             try {
-              const res = await fetch("/api/workshop-session/tooling-mock", {
+              const res = await fetch("/api/tooling-mock/call", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ session_id: sid, call: args }),
+                body: JSON.stringify({ call: args }),
               });
               const data = await res.json().catch(() => ({}));
               appendSystemTranscriptToTextOutputs(

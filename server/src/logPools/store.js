@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { ensureToolingMockSeeded } from "../toolingMock/store.js";
 import { simulateLogEvents } from "./simulator.js";
+import { loadToolingRefsForLogs } from "./toolingRefs.js";
 import { validateReadOnlySelect } from "./sqlSafety.js";
 import { ensureLogPoolsDir, poolDbPath, sanitizePoolName } from "./paths.js";
 
@@ -106,6 +108,7 @@ export function logPoolExists(poolName) {
  * @param {object} raw
  */
 export function generateLogPool(raw) {
+  ensureToolingMockSeeded();
   const name = sanitizePoolName(raw.name);
   if (!name) {
     return { ok: false, error: "invalid_name", message: "Pool name must be alphanumeric (hyphens/underscores allowed)." };
@@ -128,11 +131,13 @@ export function generateLogPool(raw) {
     for (const row of rows) insert.run(row);
   });
 
+  const toolingRefs = loadToolingRefsForLogs();
   const sim = simulateLogEvents({
     scenarioPreset,
     targetBytes,
     errorPathPercent: Number.isFinite(errorPathPercent) ? errorPathPercent : undefined,
     seed: raw.seed != null ? Number(raw.seed) : undefined,
+    toolingRefs,
     onBatch: (rows) => insertMany(rows),
   });
 

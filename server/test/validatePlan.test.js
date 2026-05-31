@@ -53,6 +53,7 @@ describe("validatePlan", () => {
   it("accepts optional workshop session ids on the plan", () => {
     const r = validatePlan({
       version: 1,
+      toolingMockReady: true,
       toolingMockSessionId: "tm-1",
       dynamicUiSessionId: "du-1",
       blocks: [
@@ -62,6 +63,7 @@ describe("validatePlan", () => {
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
+      expect(r.plan.toolingMockReady).toBe(true);
       expect(r.plan.toolingMockSessionId).toBe("tm-1");
       expect(r.plan.dynamicUiSessionId).toBe("du-1");
     }

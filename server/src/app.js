@@ -8,7 +8,7 @@ import { buildRealtimePostConnectSession, mintRealtimeClientSecret } from "./rea
 import { generateWorkshopImageFromPlan } from "./imageGeneration.js";
 import { generateWorkshopSpeechFromPlan } from "./speechGeneration.js";
 import { generateDynamicUiFromPrompt } from "./dynamicUiGeneration.js";
-import { createMockToolingSession, hasMockToolingSession, runMockToolingCall } from "./mockToolingStore.js";
+import { ensureToolingMockSeeded, runToolingMockCall } from "./mockToolingStore.js";
 import {
   createDynamicUiSession,
   hasDynamicUiSession,
@@ -17,7 +17,7 @@ import {
 } from "./dynamicUiSessionStore.js";
 import { generateLogPool, listLogPools, resolveAnalyzerPoolName, runLogPoolSql } from "./logPools/store.js";
 import { sanitizePoolName } from "./logPools/paths.js";
-import { planHasLogAnalyzer } from "./logPoolTools.js";
+import { planHasLogAnalyzer, planHasLogGenerator } from "./logPoolTools.js";
 import { planHasVectorDb } from "./knowledgePoolTools.js";
 import {
   getKnowledgePoolSummary,
@@ -28,6 +28,7 @@ import {
   uploadKnowledgePoolFile,
 } from "./knowledgePools/store.js";
 import { sanitizeKnowledgePoolName } from "./knowledgePools/paths.js";
+import { TOOLING_DOMAIN_SCHEMAS } from "./toolingMock/schema.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -77,6 +78,7 @@ export function createApp(opts) {
   });
 
   app.post("/api/log-pools/generate", (req, res) => {
+    ensureToolingMockSeeded();
     const out = generateLogPool(req.body?.call && typeof req.body.call === "object" ? req.body.call : req.body);
     return res.status(out.ok ? 200 : 400).json(out);
   });
@@ -247,9 +249,12 @@ export function createApp(opts) {
       const secret = await mintRealtimeClientSecret(result.plan);
       const base = (process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
 
-      let toolingMockSessionId;
+      let toolingMockReady = false;
+      if (planHasProcessTooling(result.plan) || planHasLogGenerator(result.plan)) {
+        ensureToolingMockSeeded();
+      }
       if (planHasProcessTooling(result.plan)) {
-        toolingMockSessionId = createMockToolingSession();
+        toolingMockReady = true;
       }
       let dynamicUiSessionId;
       if (planUsesDynamicUiModule(result.plan)) {
@@ -258,7 +263,7 @@ export function createApp(opts) {
 
       /** @type {Record<string, unknown>} */
       const planForSession = { ...result.plan };
-      if (toolingMockSessionId) planForSession.toolingMockSessionId = toolingMockSessionId;
+      if (toolingMockReady) planForSession.toolingMockReady = true;
       if (dynamicUiSessionId) planForSession.dynamicUiSessionId = dynamicUiSessionId;
 
       const client_events = buildRealtimeBootstrapClientEvents(planForSession);
@@ -273,7 +278,7 @@ export function createApp(opts) {
         post_connect_session,
         orchestration: { version: 1, client_events },
       };
-      if (toolingMockSessionId) payload.tooling_mock_session_id = toolingMockSessionId;
+      if (toolingMockReady) payload.tooling_mock_ready = true;
       if (dynamicUiSessionId) payload.dynamic_ui_session_id = dynamicUiSessionId;
       if (planHasLogAnalyzer(result.plan)) {
         const pool = resolveAnalyzerPoolName(result.plan);
@@ -371,13 +376,21 @@ export function createApp(opts) {
   });
 
   app.post("/api/workshop-session/tooling-mock", (req, res) => {
-    const sessionId = String(req.body?.session_id || "").trim();
+    ensureToolingMockSeeded();
     const call = req.body?.call && typeof req.body.call === "object" ? req.body.call : req.body;
-    if (!hasMockToolingSession(sessionId)) {
-      return res.status(404).json({ ok: false, error: "unknown_session" });
-    }
-    const out = runMockToolingCall(sessionId, call);
+    const out = runToolingMockCall(call);
     return res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.post("/api/tooling-mock/call", (req, res) => {
+    ensureToolingMockSeeded();
+    const call = req.body?.call && typeof req.body.call === "object" ? req.body.call : req.body;
+    const out = runToolingMockCall(call);
+    return res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.get("/api/tooling-mock/schema", (_req, res) => {
+    res.json({ ok: true, domains: TOOLING_DOMAIN_SCHEMAS });
   });
 
   app.post("/api/dynamic-ui/generate", async (req, res) => {

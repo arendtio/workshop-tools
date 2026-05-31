@@ -491,6 +491,72 @@ button.chip:hover {
   margin-top: 0.1rem;
 }
 
+.tooling-access-title {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.tooling-access-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+}
+
+.tooling-access-row {
+  display: grid;
+  grid-template-columns: 1fr 3.25rem 4.5rem;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.65rem;
+}
+
+.tooling-access-head {
+  color: var(--text-muted);
+  font-weight: 600;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.tooling-access-svc {
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.tooling-access-col {
+  justify-self: center;
+}
+
+.tooling-access-row .field-checkbox {
+  justify-content: center;
+  width: 100%;
+}
+
+.tooling-schema-panel {
+  margin-top: 0.35rem;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.tooling-schema-domain {
+  margin-top: 0.25rem;
+}
+
+.tooling-schema-domain summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tooling-schema-fields {
+  margin: 0.2rem 0 0.35rem 1rem;
+  padding: 0;
+}
+
 .field label.field-checkbox {
   display: flex;
   align-items: center;

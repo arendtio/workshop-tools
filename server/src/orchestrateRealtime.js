@@ -5,6 +5,8 @@
 
 import { getKnowledgePoolSummary, resolveKnowledgePoolName } from "./knowledgePools/store.js";
 import { getLogPoolSummary, logPoolExists, resolveAnalyzerPoolName } from "./logPools/store.js";
+import { buildFormBootstrapUserText, buildFormInputInstructions } from "./formInputContext.js";
+import { buildToolingInstructionParagraph, parseToolingGrants } from "./toolingAccess.js";
 
 const SKILL_SNIPPETS = {
   none: "",
@@ -13,19 +15,6 @@ const SKILL_SNIPPETS = {
   "workshop-writing": "Writing: tighten wording, preserve intent, offer alternatives where useful.",
   "workshop-compliance": "Tone: careful, policy-aware, avoid overclaiming; flag uncertainty explicitly.",
   "workshop-brief-de": "Language: concise German summaries unless participants choose another language.",
-};
-
-const TOOLING_ACCESS_LABEL = {
-  read: "Daten lesen",
-  write: "Daten schreiben",
-};
-
-const TOOLING_DOMAIN_LABEL = {
-  customers: "Kundendaten",
-  orders: "Auftragsdaten",
-  shop: "Shop- & Produktdaten",
-  inventory: "Lager / Bestand",
-  other: "Sonstiges",
 };
 
 /** Appended to model context whenever an `input:dynamic-ui` block exists (also appended to that block’s bootstrap item). */
@@ -149,17 +138,12 @@ export function buildFullRealtimeInstructions(plan) {
     }
   }
 
+  const formCtx = buildFormInputInstructions(plan);
+  if (formCtx) parts.push(formCtx);
+
   const tool = plan.blocks.find((b) => b.role === "process" && b.typeId === "tooling");
   if (tool) {
-    const mode = String(tool.values?.accessMode ?? "read");
-    const dom = String(tool.values?.serviceDomain ?? "");
-    const op = TOOLING_ACCESS_LABEL[mode] ?? mode;
-    const domain = TOOLING_DOMAIN_LABEL[dom] ?? dom;
-    parts.push(
-      `Tooling (workshop mock): treat data access intent as "${op}" scoped to "${domain}". ` +
-        `The Realtime tool \`workshop_mock_tooling_call\` exposes a small in-memory customers / orders / shop / inventory dataset that **persists for this run** (session id is injected server-side when the client secret is minted). ` +
-        `Use list/get/create/update/delete on the matching domain; do not invent private production data.`,
-    );
+    parts.push(buildToolingInstructionParagraph(parseToolingGrants(tool.values)));
   }
 
   const logGen = plan.blocks.find((b) => b.role === "process" && b.typeId === "log-generator");
@@ -172,6 +156,7 @@ export function buildFullRealtimeInstructions(plan) {
         "You **must** call `workshop_log_pool_generate` to create or overwrite a named pool; do not invent log lines in chat. " +
         `Default scenario preset in the UI: \`${preset}\` (shop package lifecycle: delivery, goods receipt, scan, pickup, error paths). ` +
         "Each `message_key` has a fixed priority and message template; the server simulates correlated package timelines. " +
+        "Generated logs reference **real** shop numbers, order ids, customer ids, and product ids from the tooling mock SQLite DB (`data/tooling-mock/`) when that DB is seeded. " +
         (defaultName
           ? `Suggested pool name from the workbench: \`${defaultName}\` (still confirm with the participant). `
           : "") +
@@ -341,12 +326,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
     }
 
     if (b.typeId === "form") {
-      const body = serializeFormItems(Array.isArray(b.formItems) ? b.formItems : []);
-      events.push(
-        conversationUserText(
-          `${label} — form blueprint\n${body || "(no fields defined)"}\n\nSerialize participant answers as JSON when submitted.`,
-        ),
-      );
+      events.push(conversationUserText(buildFormBootstrapUserText(b, label)));
       continue;
     }
 

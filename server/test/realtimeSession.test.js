@@ -201,11 +201,16 @@ describe("buildRealtimePostConnectSession", () => {
   it("registers mock tooling + dynamic UI tools when session ids are present on the plan", () => {
     const session = buildRealtimePostConnectSession({
       version: 1,
-      toolingMockSessionId: "mock-sess-1",
+      toolingMockReady: true,
       dynamicUiSessionId: "dyn-sess-1",
       blocks: [
         { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
-        { id: "2", role: "process", typeId: "tooling", values: { accessMode: "read", serviceDomain: "customers" } },
+        {
+          id: "2",
+          role: "process",
+          typeId: "tooling",
+          values: { svc_customers_read: "1", svc_customers_write: "0" },
+        },
         { id: "3", role: "input", typeId: "dynamic-ui", values: { uiPrompt: "sliders" } },
         { id: "4", role: "output", typeId: "text", values: {} },
       ],

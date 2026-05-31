@@ -1,9 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
-import { createMockToolingSession } from "../src/mockToolingStore.js";
+import { ensureToolingMockDatabase } from "../src/mockToolingStore.js";
+import { closeToolingDatabaseForTests } from "../src/toolingMock/store.js";
 import { createDynamicUiSession } from "../src/dynamicUiSessionStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -292,21 +295,31 @@ describe("HTTP API", () => {
     expect(String(res.body.data_url)).toMatch(/^data:audio\/mpeg;base64,/);
   });
 
-  it("POST /api/workshop-session/tooling-mock persists mutations per session", async () => {
-    const sid = createMockToolingSession();
+  it("POST /api/tooling-mock/call persists mutations in SQLite", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-tooling-api-"));
+    process.env.WORKSHOP_TOOLING_MOCK_DIR = tmpDir;
+    closeToolingDatabaseForTests();
+    ensureToolingMockDatabase();
     const app = createApp({ staticRoot });
+    const list = await request(app)
+      .post("/api/tooling-mock/call")
+      .send({ call: { domain: "customers", operation: "list", filter: { customer_id: "cust-000001" } } });
+    expect(list.status).toBe(200);
+    const custId = list.body.data[0].id;
     const r2 = await request(app)
-      .post("/api/workshop-session/tooling-mock")
+      .post("/api/tooling-mock/call")
       .send({
-        session_id: sid,
-        call: { domain: "customers", operation: "update", id: "cust-001", record: { city: "Köln" } },
+        call: { domain: "customers", operation: "update", id: custId, record: { ort: "Köln" } },
       });
     expect(r2.status).toBe(200);
     expect(r2.body.ok).toBe(true);
     const r3 = await request(app)
-      .post("/api/workshop-session/tooling-mock")
-      .send({ session_id: sid, call: { domain: "customers", operation: "get", id: "cust-001" } });
-    expect(r3.body.data.city).toBe("Köln");
+      .post("/api/tooling-mock/call")
+      .send({ call: { domain: "customers", operation: "get", id: custId } });
+    expect(r3.body.data.ort).toBe("Köln");
+    closeToolingDatabaseForTests();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.WORKSHOP_TOOLING_MOCK_DIR;
   });
 
   it("POST /api/workshop-session/dynamic-ui patches and reads state", async () => {

@@ -46,7 +46,7 @@ describe("orchestrateRealtime", () => {
         {
           role: "process",
           typeId: "tooling",
-          values: { accessMode: "read", serviceDomain: "orders" },
+          values: { svc_orders_read: "1", svc_orders_write: "0" },
         },
         { role: "output", typeId: "text", values: {} },
       ],
@@ -71,6 +71,30 @@ describe("orchestrateRealtime", () => {
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("conversation.item.create");
     expect(events[0].item.content[0].text).toContain("Hi");
+  });
+
+  it("includes form participant values in bootstrap and instructions", () => {
+    const blocks = [
+      {
+        id: "f1",
+        role: "input",
+        typeId: "form",
+        formItems: [
+          { id: "1", typ: "text", label: "Vorname" },
+          { id: "2", typ: "text", label: "Nachname" },
+        ],
+        formParticipantValues: { Vorname: "Maria", Nachname: "Müller" },
+      },
+      { role: "output", typeId: "text", values: {} },
+    ];
+    const events = buildRealtimeBootstrapClientEvents({ blocks });
+    expect(events).toHaveLength(1);
+    const text = events[0].item.content[0].text;
+    expect(text).toContain("Maria");
+    expect(text).toContain("first_name");
+    const instr = buildFullRealtimeInstructions({ blocks });
+    expect(instr).toContain("Maria");
+    expect(instr).toContain("Müller");
   });
 
   it("defers audio-rec input to the client (no bootstrap item)", () => {

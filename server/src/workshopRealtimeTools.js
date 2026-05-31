@@ -99,36 +99,89 @@ export function buildWorkshopEmitDynamicUiTool() {
   };
 }
 
-/**
- * @param {{ toolingMockSessionId?: string }} plan
- */
-export function buildWorkshopMockToolingCallTool(plan) {
-  const sid = String(plan.toolingMockSessionId || "").trim();
-  const short = sid ? `${sid.slice(0, 8)}…` : "(missing)";
+const TOOLING_FILTER_SCHEMA = {
+  type: "object",
+  description:
+    "Required for operation=list — at least one criterion, OR sample:true for a preview (first N rows). " +
+    "Customers: first_name + last_name (aliases vorname, nachname, firstName, lastName), customer_id, name_contains, sample. " +
+    "Orders: customer_id, status, total_min/max, product_id, min_line_quantity, sample, … " +
+    "Shop: number, number_min/max, region, status. " +
+    "Products: category, sku, title_contains, price_min/max. " +
+    "Inventory: product_id, warehouse, quantity_min/max.",
+  properties: {
+    customer_id: { type: "string" },
+    order_id: { type: "string" },
+    shop_id: { type: "string" },
+    shop_number: { type: "string" },
+    product_id: { type: "string" },
+    inventory_id: { type: "string" },
+    sku: { type: "string" },
+    status: { type: "string" },
+    region: { type: "string" },
+    number: { type: "string", description: "Shop four-digit number (e.g. 1042)." },
+    number_min: { type: "number" },
+    number_max: { type: "number" },
+    zip: { type: "string" },
+    ort: { type: "string", description: "Ort (Wohnort); alias city / stadt." },
+    category: { type: "string" },
+    warehouse: { type: "string" },
+    total_min: { type: "number" },
+    total_max: { type: "number" },
+    price_min: { type: "number" },
+    price_max: { type: "number" },
+    quantity_min: { type: "number" },
+    quantity_max: { type: "number" },
+    min_line_quantity: { type: "number", description: "Orders with any line qty >= this value." },
+    created_from: { type: "string", description: "ISO date YYYY-MM-DD." },
+    created_to: { type: "string", description: "ISO date YYYY-MM-DD." },
+    first_name: { type: "string", description: "Customer first name (Vorname)." },
+    last_name: { type: "string", description: "Customer last name (Nachname)." },
+    vorname: { type: "string", description: "Alias for first_name." },
+    nachname: { type: "string", description: "Alias for last_name." },
+    name_contains: { type: "string", description: "Substring of full customer name." },
+    title_contains: { type: "string" },
+    email_contains: { type: "string" },
+    sample: {
+      type: "boolean",
+      description: "If true, return first `limit` rows without other criteria (preview only).",
+    },
+    offset: { type: "integer", minimum: 0, description: "Pagination offset (default 0)." },
+  },
+  additionalProperties: false,
+};
+
+/** @param {{ toolingMockReady?: boolean }} _plan */
+export function buildWorkshopMockToolingCallTool(_plan) {
   return {
     type: "function",
     name: "workshop_mock_tooling_call",
     description:
-      "Workshop **mock** data plane (customers, orders, shop, inventory, other). " +
-      `All calls for this run share persisted in-memory state (session ${short}). ` +
-      "Operations: list; get (needs id); create (record object, optional id field); update or patch (needs id + record); delete (needs id). " +
-      "German UI labels map to the same domains (Kundendaten→customers, Auftragsdaten→orders, …).",
+      "Workshop **mock** ERP data (SQLite on server, shared across runs): shops 1000–2000, ~800 customers, orders, products, inventory. " +
+      "**list** requires `filter` with at least one field, or `{ sample: true }` for a preview. Customer search: `first_name` + `last_name` (German: vorname/nachname). Cap `limit` at 100. " +
+      "create / update / patch / delete respect workshop read-write scopes. " +
+      "Domains: customers, orders, shop, products, inventory, other.",
     parameters: {
       type: "object",
       properties: {
         domain: {
           type: "string",
-          enum: ["customers", "orders", "shop", "inventory", "other"],
-          description: "Mock dataset partition.",
+          enum: ["customers", "orders", "shop", "products", "inventory", "other"],
         },
         operation: {
           type: "string",
           enum: ["list", "get", "create", "update", "patch", "delete"],
         },
+        filter: TOOLING_FILTER_SCHEMA,
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "Max rows for list (default 100).",
+        },
         id: { type: "string", description: "Row id for get / update / delete." },
         record: {
           type: "object",
-          description: "Payload for create or update (arbitrary string fields).",
+          description: "Payload for create or update.",
           additionalProperties: true,
         },
       },
@@ -184,7 +237,7 @@ export function buildWorkshopDynamicUiApplyDataTool(plan) {
 }
 
 /**
- * @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[], toolingMockSessionId?: string, dynamicUiSessionId?: string }} plan
+ * @param {{ blocks: { role: string, typeId: string, values?: Record<string, string> }[], toolingMockReady?: boolean, dynamicUiSessionId?: string }} plan
  * @returns {object[]}
  */
 export function buildWorkshopRealtimeTools(plan) {
@@ -195,7 +248,7 @@ export function buildWorkshopRealtimeTools(plan) {
   if (planHasFormOutput(plan)) tools.push(buildWorkshopEmitFormValuesTool());
   if (planHasDynamicUiOutput(plan)) tools.push(buildWorkshopEmitDynamicUiTool());
 
-  if (planHasProcessTooling(plan) && String(plan.toolingMockSessionId || "").trim()) {
+  if (planHasProcessTooling(plan) && plan.toolingMockReady) {
     tools.push(buildWorkshopMockToolingCallTool(plan));
   }
   if (planUsesDynamicUiModule(plan) && String(plan.dynamicUiSessionId || "").trim()) {
