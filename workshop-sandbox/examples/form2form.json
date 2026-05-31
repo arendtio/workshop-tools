@@ -1,0 +1,138 @@
+{
+  "format": "workshop-sandbox-setup",
+  "version": 1,
+  "exportedAt": "2026-05-31T19:56:45.669Z",
+  "name": "Form2Form",
+  "blocks": [
+    {
+      "role": "process",
+      "typeId": "instruction",
+      "values": {
+        "system": "Use the input form to find the customer in the database and fill the customer data in the output form.\n\nIf you find multiple customers write the data to the text output.",
+        "maxIterations": "4",
+        "stopWhen": "Answer includes a numbered list."
+      }
+    },
+    {
+      "role": "output",
+      "typeId": "text",
+      "values": {}
+    },
+    {
+      "role": "input",
+      "typeId": "form",
+      "values": {},
+      "formItems": [
+        {
+          "id": "b-4_6",
+          "typ": "text",
+          "label": "Vorname",
+          "options": ""
+        },
+        {
+          "id": "b-4_7",
+          "typ": "text",
+          "label": "Nachname",
+          "options": ""
+        },
+        {
+          "id": "b-3_6",
+          "typ": "text",
+          "label": "Straße",
+          "options": ""
+        },
+        {
+          "id": "b-3_7",
+          "typ": "text",
+          "label": "Hausnummer",
+          "options": ""
+        },
+        {
+          "id": "b-3_8",
+          "typ": "text",
+          "label": "PLZ",
+          "options": ""
+        },
+        {
+          "id": "b-3_9",
+          "typ": "text",
+          "label": "Ort",
+          "options": ""
+        },
+        {
+          "id": "b-3_10",
+          "typ": "email",
+          "label": "E-Mail",
+          "options": ""
+        }
+      ]
+    },
+    {
+      "role": "output",
+      "typeId": "form",
+      "values": {},
+      "formItems": [
+        {
+          "id": "b-5_8",
+          "typ": "text",
+          "label": "Vorname",
+          "options": ""
+        },
+        {
+          "id": "b-5_9",
+          "typ": "text",
+          "label": "Nachname",
+          "options": ""
+        },
+        {
+          "id": "b-4_11",
+          "typ": "text",
+          "label": "Straße",
+          "options": ""
+        },
+        {
+          "id": "b-4_12",
+          "typ": "text",
+          "label": "Hausnummer",
+          "options": ""
+        },
+        {
+          "id": "b-4_13",
+          "typ": "text",
+          "label": "PLZ",
+          "options": ""
+        },
+        {
+          "id": "b-4_14",
+          "typ": "text",
+          "label": "Ort",
+          "options": ""
+        },
+        {
+          "id": "b-4_15",
+          "typ": "email",
+          "label": "E-Mail",
+          "options": ""
+        }
+      ]
+    },
+    {
+      "role": "process",
+      "typeId": "tooling",
+      "values": {
+        "svc_customers_read": "1",
+        "svc_customers_write": "0",
+        "svc_orders_read": "0",
+        "svc_orders_write": "0",
+        "svc_shop_read": "0",
+        "svc_shop_write": "0",
+        "svc_products_read": "0",
+        "svc_products_write": "0",
+        "svc_inventory_read": "0",
+        "svc_inventory_write": "0",
+        "svc_other_read": "0",
+        "svc_other_write": "0"
+      }
+    }
+  ]
+}

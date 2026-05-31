@@ -79,109 +79,37 @@ const OUTPUT_TYPES = [
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streamed speech / playback", live: true },
 ];
 
-/** Built-in example pipelines (minimal block list — defaults from `createBlock`). */
+/**
+ * Built-in example layouts (`examples/*.json`, full workshop exports).
+ * @type {Record<string, { label: string, file: string }>}
+ */
 const BUILTIN_PRESETS = {
-  "text-prompt": {
-    label: "Text pipeline",
-    blocks: [
-      { role: "input", typeId: "text" },
-      { role: "process", typeId: "instruction" },
-      { role: "output", typeId: "text" },
-    ],
+  "ask-the-manual": {
+    label: "Ask the manual",
+    file: "examples/ask-the-manual.json",
   },
-  vision: {
-    label: "Vision + text",
-    blocks: [
-      { role: "input", typeId: "image" },
-      { role: "input", typeId: "text" },
-      { role: "process", typeId: "instruction" },
-      { role: "process", typeId: "vector-db" },
-      { role: "output", typeId: "text" },
-    ],
+  "ask-the-log": {
+    label: "Ask the log",
+    file: "examples/ask-the-log.json",
   },
-  "live-audio": {
-    label: "Live audio",
-    blocks: [
-      { role: "input", typeId: "audio-live" },
-      { role: "process", typeId: "instruction" },
-      { role: "process", typeId: "tooling" },
-      { role: "output", typeId: "text" },
-      { role: "output", typeId: "audio-live" },
-    ],
+  "count-coffee": {
+    label: "Count coffee",
+    file: "examples/count-coffee.json",
   },
-  "multimodal-out": {
-    label: "Multimodal output",
-    blocks: [
-      { role: "input", typeId: "text" },
-      { role: "input", typeId: "image" },
-      { role: "process", typeId: "instruction" },
-      { role: "output", typeId: "text" },
-      { role: "output", typeId: "image" },
-    ],
+  "mark-feine-milde": {
+    label: "Mark Feine Milde",
+    file: "examples/mark-feine-milde.json",
   },
-  "form-ui-demo": {
-    label: "Form + UI",
-    blocks: [
-      { role: "input", typeId: "form" },
-      { role: "input", typeId: "dynamic-ui" },
-      { role: "process", typeId: "instruction" },
-      { role: "output", typeId: "text" },
-      { role: "output", typeId: "form" },
-      { role: "output", typeId: "dynamic-ui" },
-    ],
-  },
-  "log-generate": {
-    label: "Log erzeugen",
-    blocks: [
-      {
-        role: "input",
-        typeId: "text",
-        values: {
-          content:
-            "Bitte erzeuge einen Business-Log-Topf namens shop-demo (ca. 10 MB) mit dem Shop-Paket-Szenario.",
-        },
-      },
-      {
-        role: "process",
-        typeId: "instruction",
-        values: {
-          system:
-            "Du bist ein Workshop-Assistent für Log-Erzeugung. Nutze ausschließlich das Tool workshop_log_pool_generate — erfinde keine Log-Zeilen im Chat. Bestätige danach Metadaten (Name, Zeilen, Größe).",
-        },
-      },
-      { role: "process", typeId: "log-generator" },
-      { role: "output", typeId: "text" },
-    ],
-  },
-  "log-analyze": {
-    label: "Log analysieren",
-    blocks: [
-      {
-        role: "input",
-        typeId: "text",
-        values: {
-          content:
-            "Wie viele Events mit Priorität error oder blocker gibt es? Welche message_keys sind am häufigsten?",
-        },
-      },
-      {
-        role: "process",
-        typeId: "instruction",
-        values: {
-          system:
-            "Du analysierst einen zu großen SQLite-Log nur über workshop_log_sql (SELECT). Niemals den gesamten Log in die Antwort kopieren. Nenne die verwendeten Queries und eine klare Zusammenfassung.",
-        },
-      },
-      { role: "process", typeId: "log-analyzer", values: { logPool: "shop-demo" } },
-      { role: "output", typeId: "text" },
-    ],
+  form2form: {
+    label: "Form2Form",
+    file: "examples/form2form.json",
   },
 };
 
 const LAYOUT_STORAGE_KEY = "workshop-sandbox-layouts-v1";
 const SETUP_EXPORT_FORMAT = "workshop-sandbox-setup";
 const SETUP_EXPORT_VERSION = 1;
-const DEFAULT_BUILTIN_PRESET_ID = "text-prompt";
+const DEFAULT_BUILTIN_PRESET_ID = "form2form";
 
 const ROLE_LABEL = { input: "Input", process: "Processing", output: "Output" };
 
@@ -1862,9 +1790,7 @@ function entryLabel(entry) {
 async function applyEntry(entry, silent) {
   if (!entry) return false;
   if (entry.kind === "builtin") {
-    if (!BUILTIN_PRESETS[entry.presetId]) return false;
-    applyBuiltinPreset(entry.presetId, silent);
-    return true;
+    return applyBuiltinPreset(entry.presetId, silent);
   }
   if (entry.kind === "custom") {
     if (!Array.isArray(entry.blocks)) return false;
@@ -1888,7 +1814,7 @@ function applyInitialPageLayout() {
     void applyEntry(entries[0], true);
     return;
   }
-  applyBuiltinPreset(DEFAULT_BUILTIN_PRESET_ID, true);
+  void applyBuiltinPreset(DEFAULT_BUILTIN_PRESET_ID, true);
 }
 
 function renderExamplesSection() {
@@ -2248,25 +2174,27 @@ async function handleSetupImportFileChange(ev) {
   }
 }
 
-function applyBuiltinPreset(presetId, silent) {
+async function applyBuiltinPreset(presetId, silent) {
   const p = BUILTIN_PRESETS[presetId];
-  if (!p) return false;
-  if (state.running) void stopRealtimeRun();
-  state.blocks.forEach((b) => stopBlockCapture(b.id));
-  state.blocks = [];
-  audioLivePttToggleState.clear();
-  p.blocks.forEach((b) => {
-    const block = createBlock(b.role, b.typeId);
-    if (b.values && typeof b.values === "object") {
-      Object.assign(block.values, b.values);
+  if (!p?.file) return false;
+  try {
+    const res = await fetch(p.file);
+    if (!res.ok) {
+      console.warn("Example layout fetch failed", presetId, res.status);
+      return false;
     }
-    state.blocks.push(block);
-  });
-  renderAll();
-  if (!silent) {
-    showToast("Example pipeline loaded — use Run (Node server + API key) for a live model.");
+    const data = await res.json();
+    const parsed = parseSetupImportPayload(data);
+    if (!parsed || !validatePipelineSnapshotRows(parsed.blocks)) return false;
+    if (!(await restorePipelineFromSnapshot(parsed.blocks))) return false;
+    if (!silent) {
+      showToast(`Example “${p.label}” loaded — use Run (Node server + API key) for a live model.`);
+    }
+    return true;
+  } catch (e) {
+    console.warn("Example layout load failed", presetId, e);
+    return false;
   }
-  return true;
 }
 
 function stopBlockMedia(blockId) {

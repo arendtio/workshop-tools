@@ -1,0 +1,43 @@
+{
+  "format": "workshop-sandbox-setup",
+  "version": 1,
+  "exportedAt": "2026-05-31T20:21:13.153Z",
+  "name": "ask-the-log",
+  "blocks": [
+    {
+      "role": "input",
+      "typeId": "audio-live",
+      "values": {
+        "device": "",
+        "turnTaking": "ptt",
+        "pttStyle": "hold"
+      }
+    },
+    {
+      "role": "process",
+      "typeId": "instruction",
+      "values": {
+        "system": "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options."
+      }
+    },
+    {
+      "role": "process",
+      "typeId": "log-analyzer",
+      "values": {
+        "logPool": "shop-demo"
+      }
+    },
+    {
+      "role": "output",
+      "typeId": "text",
+      "values": {}
+    },
+    {
+      "role": "output",
+      "typeId": "audio-live",
+      "values": {
+        "voice": "marin"
+      }
+    }
+  ]
+}
