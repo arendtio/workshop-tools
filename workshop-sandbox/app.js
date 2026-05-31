@@ -34,7 +34,14 @@ const PROCESS_TYPES = [
     desc: "Read/write workshop data scope (stub)",
     live: false,
   },
-  { id: "skills", code: "SKL", title: "Skills / context", desc: "Platform-hosted skill presets", live: false },
+  {
+    id: "skills",
+    code: "SKL",
+    title: "Skills / context",
+    desc: "Platform-hosted skill presets",
+    live: false,
+    hidden: true,
+  },
   {
     id: "log-generator",
     code: "LOG+",
@@ -108,7 +115,6 @@ const BUILTIN_PRESETS = {
       { role: "input", typeId: "text" },
       { role: "input", typeId: "image" },
       { role: "process", typeId: "instruction" },
-      { role: "process", typeId: "skills" },
       { role: "output", typeId: "text" },
       { role: "output", typeId: "image" },
     ],
@@ -396,8 +402,8 @@ const FORM_SCHEMA = {
       "Live microphone capture for the workshop. Session type, transport, and speech models are chosen in your backend from the overall pipeline setup.",
     defaults: {
       device: "",
-      turnTaking: "vad",
-      pttStyle: "hold",
+      turnTaking: "ptt",
+      pttStyle: "toggle",
     },
     fields: [
       {
@@ -425,12 +431,6 @@ const FORM_SCHEMA = {
         ],
         showWhen: { key: "turnTaking", is: "ptt" },
       },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Browser workshops: capture audio client-side, stream to your backend, forward to OpenAI with an ephemeral client secret — never expose org API keys.",
-      },
     ],
   },
   "process:instruction": {
@@ -439,8 +439,6 @@ const FORM_SCHEMA = {
     defaults: {
       system:
         "You are a concise assistant. Respect safety policies. Prefer bullet lists when comparing options.",
-      maxIterations: "4",
-      stopWhen: "Answer includes a numbered list.",
     },
     fields: [
       {
@@ -449,20 +447,6 @@ const FORM_SCHEMA = {
         type: "textarea",
         rows: 4,
         placeholder: "Behavior, tone, constraints for this workshop step",
-      },
-      { key: "maxIterations", label: "Max iterations (agent / retry loop)", type: "number", placeholder: "4" },
-      {
-        key: "stopWhen",
-        label: "Stop condition (plain language)",
-        type: "textarea",
-        rows: 2,
-        placeholder: "When should the run stop retrying? (Your backend evaluates this.)",
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Reasoning effort and sampling live on the server; outputs are shaped by your output modules.",
       },
     ],
   },
@@ -510,12 +494,6 @@ const FORM_SCHEMA = {
         key: "_toolingSchema",
         label: "",
         type: "tooling_schema",
-      },
-      {
-        key: "_hint",
-        label: "",
-        type: "hint",
-        hint: "Lesen/Schreiben pro Service. Kunden-ID = cust-…; Suche mit filter.first_name + filter.last_name (auch vorname/nachname). Vorschau: filter.sample=true.",
       },
     ],
   },
@@ -2343,6 +2321,7 @@ function fillPalette(containerId, types, role) {
   const el = document.getElementById(containerId);
   el.innerHTML = "";
   types.forEach((t) => {
+    if (t.hidden) return;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "part";
@@ -2750,11 +2729,6 @@ function renderToolingSchemaPanel(wrap) {
         return;
       }
       box.textContent = "";
-      const intro = document.createElement("p");
-      intro.className = "field-hint";
-      intro.textContent =
-        "Mock-ERP (SQLite): Kunden ohne Filial-Zuordnung; Shop nur auf Aufträgen. list braucht filter oder sample:true (max. 100 Zeilen).";
-      box.appendChild(intro);
 
       Object.entries(data.domains).forEach(([domain, schema]) => {
         const sec = document.createElement("details");
@@ -3804,28 +3778,6 @@ function needsFormExtraOptions(typ) {
   return typ === "radio" || typ === "select";
 }
 
-/**
- * Demo values for Output form previews (read-only).
- */
-function mockFilledControlState(item, index) {
-  const L = item.label || "";
-  const l = L.toLowerCase();
-  const typ = item.typ;
-  if (typ === "checkbox") {
-    if (/datenschutz|privacy|nutzungsbedingungen|akzeptieren/i.test(l)) return true;
-    return index % 2 === 0;
-  }
-  if (/vorname|^name\b/i.test(l)) return "Lee Beispiel";
-  if (/nachname/i.test(l)) return "Demonstrant";
-  if (/e-?mail/i.test(l)) return "lee@beispiel.de";
-  if (/telefon|phone|mobil/i.test(l)) return "+49 30 91234567";
-  if (typ === "number") return String(27 + index * 11);
-  if (/stadt|city|ort/i.test(l)) return "Hamburg";
-  if (/plz|postleitzahl/i.test(l)) return "20095";
-  if (typ === "textarea") return `Automatischer Fließtext für „${L || "Freitext"}“.`;
-  return `Auto (${L || typ})`;
-}
-
 function parseFormOptions(optionsStr) {
   return String(optionsStr || "")
     .split(/[,;|]/g)
@@ -4171,8 +4123,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
     ta.rows = 3;
     ta.disabled = locked;
     if (readonlyMock) {
-      ta.value =
-        ra != null && String(ra).length ? String(ra) : String(mockFilledControlState(item, index));
+      ta.value = ra != null && String(ra).length ? String(ra) : "";
       ta.readOnly = true;
     } else {
       ta.placeholder = "(Eingabe)";
@@ -4192,9 +4143,8 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
     const cap = document.createElement("legend");
     cap.textContent = item.label;
     lg.appendChild(cap);
-    const mockPick = opts.length ? opts[Math.min(Math.max(index, 0), opts.length - 1)] : "";
-    let pick = mockPick;
-    if (readonlyMock && ra != null && String(ra).length && opts.includes(String(ra))) pick = String(ra);
+    let pick = "";
+    if (ra != null && String(ra).length && opts.includes(String(ra))) pick = String(ra);
     opts.forEach((opt) => {
       const rw = document.createElement("label");
       rw.className = "composer-form-radio-line";
@@ -4228,10 +4178,17 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
       sel.appendChild(op);
     });
     if (opts.length) {
-      if (readonlyMock && ra != null && String(ra).length && opts.includes(String(ra))) {
+      if (ra != null && String(ra).length && opts.includes(String(ra))) {
         sel.value = String(ra);
+      } else if (readonlyMock) {
+        const emptyOp = document.createElement("option");
+        emptyOp.value = "";
+        emptyOp.textContent = "—";
+        emptyOp.disabled = true;
+        emptyOp.selected = true;
+        sel.insertBefore(emptyOp, sel.firstChild);
       } else {
-        sel.selectedIndex = readonlyMock ? Math.min(1, opts.length - 1) : 0;
+        sel.selectedIndex = 0;
       }
     }
     rowWrap.appendChild(lab);
@@ -4251,7 +4208,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
     if (readonlyMock) {
       if (ra === "true" || ra === "1") cb.checked = true;
       else if (ra === "false" || ra === "0") cb.checked = false;
-      else cb.checked = !!mockFilledControlState(item, index);
+      else cb.checked = false;
     }
     row.appendChild(cb);
     row.appendChild(document.createTextNode(" " + item.label));
@@ -4269,8 +4226,7 @@ function appendFormLiveControl(host, item, index, locked, readonlyMock, runAnswe
   else inp.type = "text";
 
   if (readonlyMock) {
-    inp.value =
-      ra != null && String(ra).length ? String(ra) : String(mockFilledControlState(item, index));
+    inp.value = ra != null && String(ra).length ? String(ra) : "";
     inp.readOnly = true;
   } else {
     inp.placeholder = "…";
@@ -4294,7 +4250,7 @@ function renderFormComposerModule(block, card) {
   const hint = document.createElement("p");
   hint.className = "composer-form-lede field-hint";
   hint.textContent = isOutput
-    ? "Identisch zum Input-Form — hier mit demonstrierter Modellbefüllung."
+    ? "Identisch zum Input-Form — Vorschau bleibt leer, bis das Modell per Tool Werte liefert."
     : "Felder zusammenbauen; unten zeigt sich die spätere Participant-Oberfläche.";
 
   const toolbar = document.createElement("div");
@@ -4416,7 +4372,7 @@ function renderFormComposerModule(block, card) {
 
   const prevTitle = document.createElement("div");
   prevTitle.className = "composer-form-subtitle";
-  prevTitle.textContent = isOutput ? "Vorschau mit Demo-Befüllung" : "Live-Vorschau";
+  prevTitle.textContent = isOutput ? "Vorschau (Modellbefüllung)" : "Live-Vorschau";
 
   const prevHost = document.createElement("div");
   prevHost.className = "composer-form-preview-shell";
@@ -4567,29 +4523,62 @@ const PTT_ICON_MIC_LIVE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 
 const PTT_ICON_MIC_MUTED = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.84 18.84A8 8 0 0 1 5 15H3a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2h1"/><path d="M10.37 10.37a5 5 0 0 0-1.17 3.13V15"/><path d="M15 15v-3a5 5 0 0 0-.91-2.84"/><path d="M9 9v-1a3 3 0 0 1 5.12-2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 
+/** Fixed keyboard shortcut for live PTT (not configurable in the workshop UI). */
+const PTT_KEYBOARD_KEY_LABEL = "Strg";
+
+/**
+ * @param {{ values: Record<string, string> }} block
+ * @param {{ transmitting?: boolean, running?: boolean, micReady?: boolean }} ctx
+ */
+function formatAudioLivePttButtonLabel(block, ctx = {}) {
+  const running = ctx.running ?? state.running;
+  const transmitting = !!ctx.transmitting;
+  const micReady = ctx.micReady ?? (state.runMode === "realtime" && !!realtimeLocalStream);
+  const isHold = block.values.pttStyle !== "toggle";
+
+  if (running && !micReady) {
+    return "Mikrofon nicht verfügbar";
+  }
+  if (!running) {
+    return `Push-to-talk-Taste: ${PTT_KEYBOARD_KEY_LABEL}`;
+  }
+  if (isHold) {
+    return transmitting
+      ? `${PTT_KEYBOARD_KEY_LABEL} loslassen — Stummschalten`
+      : `${PTT_KEYBOARD_KEY_LABEL} gedrückt halten — Sprechen`;
+  }
+  return transmitting
+    ? `${PTT_KEYBOARD_KEY_LABEL} erneut drücken — Stummschalten`
+    : `${PTT_KEYBOARD_KEY_LABEL} drücken — Sprechen`;
+}
+
+/**
+ * @param {{ values: Record<string, string> }} block
+ * @param {{ transmitting?: boolean }} ctx
+ */
+function formatAudioLivePttButtonAriaLabel(block, ctx = {}) {
+  const text = formatAudioLivePttButtonLabel(block, ctx);
+  return `${text}. Zusätzlich per Maus/Touch auf dieser Schaltfläche.`;
+}
+
 /**
  * @param {{ values: Record<string, string> }} block
  * @param {HTMLElement} bar
+ * @param {{ transmitting?: boolean }} [ctx]
  */
-function syncAudioLivePttBar(block, bar) {
-  const hint = bar.querySelector(".ptt-live-hint");
+function syncAudioLivePttBar(block, bar, ctx = {}) {
   const btn = bar.querySelector(".ptt-live-btn");
-  if (!hint || !btn) return;
+  const labelEl = bar.querySelector(".ptt-live-btn-label");
+  if (!btn || !labelEl) return;
   const running = state.running;
-  const liveMic = state.runMode === "realtime" && realtimeLocalStream;
-  const isHold = block.values.pttStyle !== "toggle";
-  if (!running) {
-    hint.textContent = isHold
-      ? "Start a run to use the button. Hold while speaking."
-      : "Start a run to use the button. Press to unmute the mic, press again to mute.";
-  } else if (liveMic) {
-    hint.textContent = isHold
-      ? "Hold to unmute the microphone; release to mute again. While running, holding Ctrl does the same."
-      : "Press to unmute the microphone; press again to mute. While running, Ctrl toggles the same way.";
-  } else {
-    hint.textContent =
-      "Realtime is active but no microphone track is available yet — check permissions or wait for capture.";
-  }
+  const micReady = state.runMode === "realtime" && !!realtimeLocalStream;
+  const transmitting =
+    ctx.transmitting ??
+    (block.values.pttStyle === "toggle"
+      ? audioLivePttToggleState.get(block.id) === true
+      : btn.classList.contains("is-transmitting"));
+  labelEl.textContent = formatAudioLivePttButtonLabel(block, { transmitting, running, micReady });
+  btn.setAttribute("aria-label", formatAudioLivePttButtonAriaLabel(block, { transmitting, running, micReady }));
   btn.disabled = !running;
 }
 
@@ -4638,9 +4627,6 @@ function renderAudioLivePttBar(block, card) {
   title.className = "ptt-live-title";
   title.textContent = "Push-to-talk";
 
-  const hint = document.createElement("p");
-  hint.className = "field-hint ptt-live-hint";
-
   const isHold = block.values.pttStyle !== "toggle";
 
   const btn = document.createElement("button");
@@ -4648,7 +4634,6 @@ function renderAudioLivePttBar(block, card) {
   btn.className = "ptt-live-btn";
   btn.disabled = !state.running;
   btn.setAttribute("aria-pressed", "false");
-  btn.setAttribute("aria-label", isHold ? "Hold to speak — microphone live while pressed" : "Push to talk — toggle microphone");
   const iconWrap = document.createElement("span");
   iconWrap.className = "ptt-live-btn-icon";
   const labelEl = document.createElement("span");
@@ -4664,13 +4649,9 @@ function renderAudioLivePttBar(block, card) {
     const setHoldVisual = (transmitting) => {
       btn.classList.toggle("is-transmitting", transmitting);
       btn.setAttribute("aria-pressed", transmitting ? "true" : "false");
-      if (transmitting) {
-        setIcon("live");
-        labelEl.textContent = "Live — speaking";
-      } else {
-        setIcon("muted");
-        labelEl.textContent = "Hold to speak";
-      }
+      if (transmitting) setIcon("live");
+      else setIcon("muted");
+      syncAudioLivePttBar(block, wrap, { transmitting });
     };
     setHoldVisual(false);
     const release = () => {
@@ -4697,13 +4678,9 @@ function renderAudioLivePttBar(block, card) {
       const on = audioLivePttToggleState.get(block.id) === true;
       btn.classList.toggle("is-transmitting", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
-      if (on) {
-        setIcon("live");
-        labelEl.textContent = "Live — tap to mute";
-      } else {
-        setIcon("muted");
-        labelEl.textContent = "Tap to unmute";
-      }
+      if (on) setIcon("live");
+      else setIcon("muted");
+      syncAudioLivePttBar(block, wrap, { transmitting: on });
       if (state.runMode === "realtime" && realtimeLocalStream) setRealtimeLocalMicEnabled(on);
     };
     syncToggleUi();
@@ -4716,7 +4693,6 @@ function renderAudioLivePttBar(block, card) {
   }
 
   wrap.appendChild(title);
-  wrap.appendChild(hint);
   wrap.appendChild(btn);
   card.appendChild(wrap);
   syncAudioLivePttBar(block, wrap);
@@ -5768,20 +5744,6 @@ function updateRunChrome() {
     busy.hidden = !running;
   }
   document.body.classList.toggle("pipeline-running", running);
-  const st = document.getElementById("status-bar-text");
-  if (st) {
-    if (running && state.runMode === "realtime") {
-      st.textContent = pipelineHasLiveAudioInput()
-        ? "Realtime session — WebRTC to OpenAI. Click Running or Esc when you are done."
-        : "Realtime session — WebRTC to OpenAI. The run ends automatically when the model response completes.";
-    } else if (pipelineUsesLiveAudioModules()) {
-      st.textContent =
-        "Live-audio pipeline: Run validates the plan, then opens a Realtime WebRTC session when served from the workshop Node server (same origin).";
-    } else {
-      st.textContent =
-        "Run validates the plan and opens a Realtime WebRTC session (same origin as this Node server). Serve from `cd server && npm start` — static file hosting has no API.";
-    }
-  }
 }
 
 function lockPalette(locked) {
