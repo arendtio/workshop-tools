@@ -2925,10 +2925,10 @@ function renderAudioRecordField(field, block, disabled, wrap) {
     status.textContent = "Requesting microphone…";
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-          ? "audio/mp4"
+      const mime = MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
           : "";
       const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
       const chunks = [];
@@ -2938,10 +2938,10 @@ function renderAudioRecordField(field, block, disabled, wrap) {
       rec.addEventListener("stop", () => {
         stream.getTracks().forEach((t) => t.stop());
         if (chunks.length) {
-          const ext = mime && mime.includes("webm") ? "webm" : "m4a";
+          const ext = mime && mime.includes("mp4") ? "m4a" : "webm";
           const name = `recording-${Date.now()}.${ext}`;
           block.values[field.key] = name;
-          block._recordedAudioBlob = new Blob(chunks, { type: mime || "audio/webm" });
+          block._recordedAudioBlob = new Blob(chunks, { type: mime || "audio/mp4" });
           status.textContent = `Recorded: ${name} (attached on Run)`;
         } else {
           status.textContent = "Recording empty — try again.";
