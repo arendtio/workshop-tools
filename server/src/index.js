@@ -4,7 +4,7 @@ import { ensureOpenAiApiKeyLoaded } from "./openaiConfig.js";
 
 ensureOpenAiApiKeyLoaded();
 
-const PORT = Number(process.env.PORT || 8080);
+const PORT = Number(process.env.PORT || 5173);
 const repoRoot = resolveRepoRoot();
 const staticRoot = path.join(repoRoot, "workshop-sandbox");
 

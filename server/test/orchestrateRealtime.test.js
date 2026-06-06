@@ -122,6 +122,39 @@ describe("orchestrateRealtime", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("defers video-live input to the client (no bootstrap item)", () => {
+    const events = buildRealtimeBootstrapClientEvents({
+      blocks: [
+        {
+          id: "v",
+          role: "input",
+          typeId: "video-live",
+          values: { videoSource: "camera", frameRate: "1" },
+        },
+        { id: "o", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(events).toHaveLength(0);
+  });
+
+  it("documents video-live capture in session instructions", () => {
+    const text = buildFullRealtimeInstructions({
+      blocks: [
+        {
+          id: "v1",
+          role: "input",
+          typeId: "video-live",
+          values: { videoSource: "display", frameRate: "0.5" },
+        },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(text).toContain("live video input");
+    expect(text).toContain("data URIs");
+    expect(text).toContain("screen/display");
+    expect(text).toContain("0.5 fps");
+  });
+
   it("tells the model to defer image tool until live user instructions", () => {
     const text = buildFullRealtimeInstructions({
       blocks: [

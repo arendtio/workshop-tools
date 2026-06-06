@@ -141,6 +141,9 @@ export function buildFullRealtimeInstructions(plan) {
   const formCtx = buildFormInputInstructions(plan);
   if (formCtx) parts.push(formCtx);
 
+  const videoLiveCtx = buildVideoLiveInputInstructions(plan);
+  if (videoLiveCtx) parts.push(videoLiveCtx);
+
   const tool = plan.blocks.find((b) => b.role === "process" && b.typeId === "tooling");
   if (tool) {
     parts.push(buildToolingInstructionParagraph(parseToolingGrants(tool.values)));
@@ -224,6 +227,29 @@ function describeConfiguredOutputs(plan) {
 }
 
 /**
+ * @param {{ blocks: { role: string, typeId: string, id?: string, values?: Record<string, string> }[] }} plan
+ */
+function buildVideoLiveInputInstructions(plan) {
+  const blocks = plan.blocks.filter((b) => b.role === "input" && b.typeId === "video-live");
+  if (!blocks.length) return "";
+  const lines = [
+    "## Workshop: live video input (camera or screen)",
+    "",
+    "The browser sends **changed JPEG frames only** to Realtime as **`input_image` data URIs** (full capture resolution). Unchanged frames are skipped (hash dedup).",
+    "Do not assume you can see the scene until frames arrive; describe only what is visible in the latest frames when asked.",
+    "",
+    "Configured capture:",
+  ];
+  for (const b of blocks) {
+    const id = String(b.id || "").trim() || "(no id)";
+    const src = String(b.values?.videoSource ?? "camera").trim() === "display" ? "screen/display" : "camera";
+    const fps = String(b.values?.frameRate ?? "1").trim() || "1";
+    lines.push(`- Block \`${id}\`: ${src}, ~${fps} fps, native capture resolution.`);
+  }
+  return lines.join("\n");
+}
+
+/**
  * @param {{ blocks: { role: string, typeId: string }[] }} plan
  */
 function liveAudioImageOutputGuidance(plan) {
@@ -279,6 +305,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
   const inputs = plan.blocks.filter((b) => b.role === "input");
   for (const b of inputs) {
     if (b.typeId === "audio-live") continue;
+    if (b.typeId === "video-live") continue;
 
     const label = `Input · ${b.typeId}${b.id ? ` (${b.id})` : ""}`;
 
@@ -303,7 +330,7 @@ export function buildRealtimeBootstrapClientEvents(plan) {
             role: "user",
             content: [
               { type: "input_text", text: `${label} (image URL)` },
-              { type: "input_image", image_url: url, detail: "auto" },
+              { type: "input_image", image_url: url, detail: "high" },
             ],
           },
         });

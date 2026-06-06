@@ -689,6 +689,34 @@ button.chip:hover {
   color: var(--text-muted);
 }
 
+.video-live-preview-frame {
+  width: 100%;
+  border-radius: 4px;
+  background: #0d1117;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.video-live-preview-canvas,
+.video-live-preview-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.video-live-source-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.video-live-preview {
+  position: relative;
+}
+
 .module-card-fields {
   display: flex;
   flex-direction: column;

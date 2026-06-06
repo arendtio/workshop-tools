@@ -16,15 +16,15 @@ cd server && npm install && npm start
 
 If plan validation returns `ERR_DLOPEN_FAILED` / `better_sqlite3.node` “did not self-register”, the native module was built for another Node version — run `cd server && npm rebuild better-sqlite3` (or reinstall: `rm -rf node_modules && npm install`).
 
-Then open `http://localhost:8080` (Express serves `workshop-sandbox/` and mounts `/api/*`).
+Then open `http://localhost:5173` (Express serves `workshop-sandbox/` and mounts `/api/*`). Dev default port is **5173** (`start.sh` sets `PORT=5173`; override with `PORT` if needed).
 
 **UI only** — no `/api` routes (plan validation and **Run** need the Node server):
 
 ```sh
-python3 -m http.server 8080 --directory workshop-sandbox
+python3 -m http.server 5173 --directory workshop-sandbox
 ```
 
-Then open `http://localhost:8080`. **Run** is not available without the API (no client secret); use the Node server for any pipeline.
+Then open `http://localhost:5173`. **Run** is not available without the API (no client secret); use the Node server for any pipeline.
 
 **Docker** — build and run (set your API key in the environment):
 
@@ -36,7 +36,7 @@ docker run --rm -p 8080:8080 -e OPENAI_API_KEY="sk-..." workshop-tools
 ### Testing
 
 - **Server (automated):** `cd server && npm test` (Vitest: plan validation, Realtime session mapping, orchestration bootstrap events, HTTP routes with mocked `fetch`).
-- **Manual:** open the app from the Node server; load presets; click **Run** — the client validates the plan, obtains a client secret, opens **WebRTC** to OpenAI (`/v1/realtime/calls`), then sends orchestration events on the `oai-events` channel. Pipelines **without** a live microphone input end automatically when the model response completes (unless tool follow-ups are still pending); pipelines **with** live mic input stay open until you stop.
+- **Manual:** open the app from the Node server; load presets; click **Run** — the client validates the plan, obtains a client secret, opens **WebRTC** to OpenAI (`/v1/realtime/calls`), then sends orchestration events on the `oai-events` channel. **`video-live`** sends changed frames as full-resolution **`input_image` data URIs** on the data channel (unchanged frames skipped). Pipelines **without** a live microphone input end automatically when the model response completes (unless tool follow-ups are still pending); pipelines **with** live mic input stay open until you stop.
 - No ESLint/Prettier is configured for the static UI.
 
 ### Key Caveats

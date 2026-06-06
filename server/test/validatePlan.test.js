@@ -81,4 +81,28 @@ describe("validatePlan", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.mode).toBe("realtime");
   });
+
+  it("marks live video input pipelines as realtime", () => {
+    const r = validatePlan({
+      version: 1,
+      blocks: [
+        { id: "1", role: "input", typeId: "video-live", values: { videoSource: "display", frameRate: "1" } },
+        { id: "2", role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.mode).toBe("realtime");
+  });
+
+  it("marks live audio output-only pipelines as realtime", () => {
+    const r = validatePlan({
+      version: 1,
+      blocks: [
+        { id: "1", role: "input", typeId: "text", values: { content: "hi" } },
+        { id: "2", role: "output", typeId: "audio-live", values: { voice: "marin" } },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.mode).toBe("realtime");
+  });
 });

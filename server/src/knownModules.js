@@ -6,6 +6,7 @@ export const INPUT_TYPE_IDS = [
   "dynamic-ui",
   "audio-rec",
   "audio-live",
+  "video-live",
 ];
 
 /** @type {readonly string[]} */
@@ -29,7 +30,7 @@ export const OUTPUT_TYPE_IDS = [
 ];
 
 /** Types that imply a Realtime (WebRTC) workshop path when present. */
-export const LIVE_INPUT_TYPES = new Set(["audio-live"]);
+export const LIVE_INPUT_TYPES = new Set(["audio-live", "video-live"]);
 export const LIVE_OUTPUT_TYPES = new Set(["audio-live"]);
 
 export function isKnownBlock(role, typeId) {

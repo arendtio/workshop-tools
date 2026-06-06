@@ -22,6 +22,13 @@ const INPUT_TYPES = [
   },
   { id: "audio-rec", code: "A·R", title: "Audio (recorded)", desc: "Captured clip or file", live: false },
   { id: "audio-live", code: "A·L", title: "Audio (live)", desc: "Streaming microphone", live: true },
+  {
+    id: "video-live",
+    code: "V·L",
+    title: "Video (live)",
+    desc: "Camera or screen — periodic frames to the model",
+    live: true,
+  },
 ];
 
 const PROCESS_TYPES = [
@@ -133,6 +140,34 @@ const OPENAI_VOICE_SELECT_OPTIONS = [
 /** @type {Map<string, MediaStream>} block id → active preview stream */
 const blockMediaStreams = new Map();
 
+/**
+ * @typedef {{
+ *   sourceVideo: HTMLVideoElement,
+ *   previewImg: HTMLImageElement | null,
+ *   previewCanvas: HTMLCanvasElement | null,
+ *   frameWrap: HTMLElement | null,
+ *   previewRafId: number | null,
+ *   noteEl: HTMLElement | null,
+ *   syncCaptureUi: ((active: boolean) => void) | null,
+ * }} VideoLiveSession
+ */
+
+/** @type {Map<string, VideoLiveSession>} block id → live video capture session */
+const videoLiveSessions = new Map();
+
+/** @type {Map<string, { timerId: number, lastHash: string }>} block id → frame sampler */
+const videoLiveFrameTimers = new Map();
+
+/** @type {Promise<void> | null} */
+let videoLiveCaptureInitPromise = null;
+
+/** Frame interval ms keyed by `input:video-live` `frameRate` value. */
+const VIDEO_LIVE_FRAME_INTERVAL_MS = {
+  "0.5": 2000,
+  "1": 1000,
+  "2": 500,
+};
+
 /** @type {Map<string, { recorder: MediaRecorder, chunks: BlobPart[], statusEl: HTMLElement | null }>} */
 const blockMediaRecorders = new Map();
 
@@ -228,7 +263,7 @@ function toolingAccessDefaults() {
 /**
  * Mock form fields per module type. Keys are `role:typeId`.
  * Field objects: type is one of text, textarea, number, select, segmented, dropzone, hint,
- * camera_preview, file, media_device, audio_record.
+ * camera_preview, file, media_device, audio_record, video_live_capture.
  * @type {Record<string, { apiMapping?: string, defaults: Record<string, string>, fields: object[] }>}
  */
 const FORM_SCHEMA = {
@@ -261,7 +296,6 @@ const FORM_SCHEMA = {
       imageSource: "file",
       imageUrl: "",
       uploadStub: "",
-      scaleTo512: "1",
     },
     fields: [
       {
@@ -279,13 +313,6 @@ const FORM_SCHEMA = {
         type: "dropzone",
         accept: "image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif",
         dropLabel: "Drop image here or click to browse",
-        showWhen: { key: "imageSource", is: "file" },
-      },
-      {
-        key: "scaleTo512",
-        label: "",
-        type: "checkbox",
-        checkboxLabel: "Auf maximal 512 Pixel skalieren",
         showWhen: { key: "imageSource", is: "file" },
       },
       {
@@ -358,6 +385,54 @@ const FORM_SCHEMA = {
           { value: "toggle", label: "Press to start / press again to stop" },
         ],
         showWhen: { key: "turnTaking", is: "ptt" },
+      },
+    ],
+  },
+  "input:video-live": {
+    apiMapping:
+      "Live camera or display capture; changed JPEG frames go to Realtime as `input_image` data URIs. Unchanged frames are skipped (hash dedup).",
+    defaults: {
+      videoSource: "camera",
+      device: "",
+      frameRate: "1",
+    },
+    fields: [
+      {
+        key: "videoSource",
+        label: "Source",
+        type: "segmented",
+        options: [
+          { value: "camera", label: "Camera" },
+          { value: "display", label: "Screen" },
+        ],
+      },
+      {
+        key: "device",
+        label: "Camera",
+        type: "media_device",
+        kind: "videoinput",
+        showWhen: { key: "videoSource", is: "camera" },
+      },
+      {
+        key: "frameRate",
+        label: "Frame rate",
+        type: "select",
+        options: [
+          { value: "0.5", label: "0.5 fps (screen — recommended)" },
+          { value: "1", label: "1 fps (default)" },
+          { value: "2", label: "2 fps (motion)" },
+        ],
+      },
+      {
+        key: "capture",
+        label: "Live preview",
+        type: "video_live_capture",
+      },
+      {
+        key: "_hint",
+        label: "",
+        type: "hint",
+        hint: "Capture starts on Run. Changed frames only — full resolution JPEG as Realtime data URI (unchanged frames skipped).",
       },
     ],
   },
@@ -721,6 +796,13 @@ function pipelineHasLiveAudioInput() {
   return state.blocks.some((b) => b.role === "input" && b.typeId === "audio-live");
 }
 
+/** Live inputs that keep the Realtime session open (no auto-stop after first response). */
+function pipelineKeepsRealtimeSessionOpen() {
+  return state.blocks.some(
+    (b) => b.role === "input" && (b.typeId === "audio-live" || b.typeId === "video-live"),
+  );
+}
+
 /** Streamed speech on the Realtime WebRTC audio track (output:audio-live only). */
 function pipelineWantsRealtimeAudioOutput() {
   return state.blocks.some((b) => b.role === "output" && b.typeId === "audio-live");
@@ -733,16 +815,6 @@ const KNOWLEDGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Guard for `input_image` data URLs on the Realtime data channel (character count incl. prefix). */
 const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
-
-/**
- * Target max encoded size when auto-scaling to 512 px (empirical Realtime data-channel limit ~10k chars).
- */
-const REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS = 10_000;
-
-/**
- * Target max encoded size for full multi-step compression (checkbox off).
- */
-const REALTIME_INPUT_IMAGE_TARGET_MAX_DATA_URL_CHARS = 900_000;
 
 /**
  * @param {AudioBuffer} ab
@@ -931,6 +1003,10 @@ async function pushSingleInputModuleToRealtime(dc, block) {
   const label = `Input · ${block.typeId}${block.id ? ` (${block.id})` : ""} — ${partTitle}`;
 
   if (block.typeId === "audio-live") return;
+  if (block.typeId === "video-live") {
+    await sendRealtimeVideoLiveFrame(dc, block, { force: true });
+    return;
+  }
 
   if (block.typeId === "audio-rec") {
     await sendRealtimeAudioRecBlock(dc, block);
@@ -953,7 +1029,7 @@ async function pushSingleInputModuleToRealtime(dc, block) {
             role: "user",
             content: [
               { type: "input_text", text: `${label} (image URL)` },
-              { type: "input_image", image_url: url, detail: "auto" },
+              { type: "input_image", image_url: url, detail: "high" },
             ],
           },
         }),
@@ -1050,73 +1126,43 @@ async function pushAllInputModulesToRealtime(dc) {
 }
 
 /**
- * @param {{ values?: Record<string, string> }} block
- * @returns {boolean}
- */
-function imageInputScaleTo512Enabled(block) {
-  const v = block.values?.scaleTo512;
-  if (v === undefined || v === null || v === "") return true;
-  return v === "1" || v === "true";
-}
-
-/**
- * Re-encode to JPEG and cap dimensions so `input_image` fits Realtime data-channel frames.
+ * Re-encode JPEG at native dimensions until a data URL fits the Realtime limit (no resize).
  * @param {Blob} blob
- * @param {{ scaleTo512?: boolean }} [options]
+ * @param {number} maxChars
  * @returns {Promise<Blob>}
  */
-async function compressImageBlobForRealtimeChannel(blob, options = {}) {
+async function reencodeJpegBlobUnderDataUrlCharLimit(blob, maxChars) {
   if (!(blob instanceof Blob) || blob.size < 1) return blob;
-  const scaleTo512 = !!options.scaleTo512;
-  const sizeTarget = scaleTo512
-    ? REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS
-    : REALTIME_INPUT_IMAGE_TARGET_MAX_DATA_URL_CHARS;
+  const initial = await readBlobAsDataUrl(blob);
+  if (initial.length <= maxChars) return blob;
   let bmp;
   try {
     bmp = await createImageBitmap(blob);
   } catch (err) {
-    console.warn("createImageBitmap failed; sending original blob (may be too large)", err);
+    console.warn("reencodeJpegBlobUnderDataUrlCharLimit: createImageBitmap failed", err);
     return blob;
   }
   try {
-    const attempts = scaleTo512
-      ? [
-          { maxSide: 512, q: 0.72 },
-          { maxSide: 512, q: 0.55 },
-          { maxSide: 512, q: 0.4 },
-        ]
-      : [
-          { maxSide: 1536, q: 0.82 },
-          { maxSide: 1152, q: 0.74 },
-          { maxSide: 896, q: 0.66 },
-          { maxSide: 640, q: 0.58 },
-        ];
+    const qualities = [0.88, 0.78, 0.68, 0.58, 0.48, 0.38, 0.28];
     /** @type {Blob | null} */
     let smallest = null;
-    let smallestLen = Infinity;
-    for (const { maxSide, q } of attempts) {
-      const w = bmp.width;
-      const h = bmp.height;
-      const scale = Math.min(1, maxSide / Math.max(w, h));
-      const tw = Math.max(1, Math.round(w * scale));
-      const th = Math.max(1, Math.round(h * scale));
+    let smallestLen = initial.length;
+    for (const q of qualities) {
       const canvas = document.createElement("canvas");
-      canvas.width = tw;
-      canvas.height = th;
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
       const ctx = canvas.getContext("2d");
       if (!ctx) break;
-      ctx.drawImage(bmp, 0, 0, tw, th);
+      ctx.drawImage(bmp, 0, 0);
       const jpegBlob = await new Promise((res) => {
-        canvas.toBlob((b) => res(b), "image/jpeg", q);
+        canvas.toBlob((b) => res(b instanceof Blob ? b : null), "image/jpeg", q);
       });
       if (!(jpegBlob instanceof Blob) || jpegBlob.size < 1) continue;
       const du = await readBlobAsDataUrl(jpegBlob);
+      if (du.length <= maxChars) return jpegBlob;
       if (du.length < smallestLen) {
         smallestLen = du.length;
         smallest = jpegBlob;
-      }
-      if (du.length <= sizeTarget) {
-        return jpegBlob;
       }
     }
     return smallest instanceof Blob ? smallest : blob;
@@ -1139,7 +1185,24 @@ function readBlobAsDataUrl(blob) {
 }
 
 /**
- * Full-resolution references for `/api/images/generate` (not the 512 px Realtime preview).
+ * @param {Blob} blob
+ * @returns {Promise<{ blob: Blob, dataUrl: string } | null>}
+ */
+async function encodeImageBlobForRealtimeDataUrl(blob) {
+  if (!(blob instanceof Blob) || blob.size < 1) return null;
+  const inlineBlob = await reencodeJpegBlobUnderDataUrlCharLimit(
+    blob,
+    REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS,
+  );
+  const dataUrl = await readBlobAsDataUrl(inlineBlob);
+  if (!dataUrl.startsWith("data:image/") || dataUrl.length > REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS) {
+    return null;
+  }
+  return { blob: inlineBlob, dataUrl };
+}
+
+/**
+ * Full-resolution references for `/api/images/generate`.
  * @returns {Promise<{ block_id: string, image_url: string }[]>}
  */
 async function collectInputImageReferencesForGeneration() {
@@ -1178,13 +1241,11 @@ async function sendRealtimeInputImageBlock(dc, block) {
     return;
   }
 
-  const scale512 = imageInputScaleTo512Enabled(block);
   const inputText = `${label} (local file, attached as input_image)`;
 
-  let dataUrl;
+  let encoded;
   try {
-    const compressed = await compressImageBlobForRealtimeChannel(blob, { scaleTo512: scale512 });
-    dataUrl = await readBlobAsDataUrl(compressed);
+    encoded = await encodeImageBlobForRealtimeDataUrl(blob);
   } catch (err) {
     console.warn("Image read failed", err);
     showToast("Could not read image file.");
@@ -1192,25 +1253,14 @@ async function sendRealtimeInputImageBlock(dc, block) {
     return;
   }
 
-  if (!dataUrl.startsWith("data:image/")) {
-    sendRealtimeUserTextItem(dc, `${label}\n(Selected file is not a supported image type.)`);
-    return;
-  }
-  if (dataUrl.length > REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS) {
-    showToast("Image still too large after compression — use a smaller source or an HTTPS URL.");
+  if (!encoded) {
+    showToast("Image too large for the Realtime data channel after compression.");
     sendRealtimeUserTextItem(
       dc,
-      `${label}\n(Image still too large after browser compression for the Realtime data channel.)`,
+      `${label}\n(Image still too large for the Realtime data channel at full resolution.)`,
     );
     return;
   }
-  if (dataUrl.length > REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS) {
-    console.warn(
-      `[workshop] Realtime input_image data URL is ${dataUrl.length} chars (>${REALTIME_INPUT_IMAGE_TARGET_512PX_DATA_URL_CHARS}); vision may fail on the data channel.`,
-    );
-  }
-
-  const imageDetail = scale512 ? "low" : "auto";
 
   try {
     dc.send(
@@ -1221,7 +1271,7 @@ async function sendRealtimeInputImageBlock(dc, block) {
           role: "user",
           content: [
             { type: "input_text", text: inputText },
-            { type: "input_image", image_url: dataUrl, detail: imageDetail },
+            { type: "input_image", image_url: encoded.dataUrl, detail: "high" },
           ],
         },
       }),
@@ -1231,8 +1281,463 @@ async function sendRealtimeInputImageBlock(dc, block) {
     showToast("Could not send image to Realtime (message too large or channel closed).");
     sendRealtimeUserTextItem(
       dc,
-      `${label}\n(Image could not be sent on the data channel — try a smaller image or an HTTPS URL.)`,
+      `${label}\n(Image could not be sent on the data channel.)`,
     );
+  }
+}
+
+/**
+ * @param {HTMLVideoElement} video
+ * @returns {Promise<{ blob: Blob, hash: string, width: number, height: number } | null>}
+ */
+async function captureVideoLiveFrame(video) {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  const tw = video.videoWidth;
+  const th = video.videoHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = tw;
+  canvas.height = th;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(video, 0, 0, tw, th);
+  const hashCanvas = document.createElement("canvas");
+  hashCanvas.width = 16;
+  hashCanvas.height = 16;
+  const hctx = hashCanvas.getContext("2d");
+  if (!hctx) return null;
+  hctx.drawImage(canvas, 0, 0, 16, 16);
+  const pixels = hctx.getImageData(0, 0, 16, 16).data;
+  let hash = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    hash = (hash * 31 + pixels[i] + pixels[i + 1] + pixels[i + 2]) | 0;
+  }
+  const blob = await new Promise((res) => {
+    canvas.toBlob((b) => res(b), "image/jpeg", 0.92);
+  });
+  if (!(blob instanceof Blob) || blob.size < 1) return null;
+  return { blob, hash: String(hash), width: tw, height: th };
+}
+
+/**
+ * @param {string} blockId
+ */
+function revokeVideoLivePreviewObjectUrl(blockId) {
+  const entry = videoLiveFrameTimers.get(blockId);
+  if (!entry?.lastPreviewObjectUrl) return;
+  URL.revokeObjectURL(entry.lastPreviewObjectUrl);
+  entry.lastPreviewObjectUrl = null;
+}
+
+/**
+ * @param {string} blockId
+ * @param {string} previewUrl
+ * @param {number} width
+ * @param {number} height
+ */
+function applyVideoLivePreviewDisplay(blockId, previewUrl, width, height) {
+  const session = videoLiveSessions.get(blockId);
+  if (!session?.previewImg || !session.frameWrap) return;
+  session.previewImg.src = previewUrl;
+  session.previewImg.hidden = false;
+  if (session.previewCanvas) session.previewCanvas.hidden = true;
+  session.frameWrap.style.aspectRatio = `${width} / ${height}`;
+  stopVideoLivePreviewLoop(blockId);
+}
+
+/**
+ * @param {HTMLVideoElement} sourceVideo
+ * @param {{ id: string, values?: Record<string, string> }} block
+ */
+function drawVideoLiveInterimPreview(sourceVideo, block) {
+  const session = videoLiveSessions.get(block.id);
+  if (!session?.previewCanvas || !session.frameWrap || !sourceVideo.videoWidth) return;
+  const tw = sourceVideo.videoWidth;
+  const th = sourceVideo.videoHeight;
+  session.previewCanvas.width = tw;
+  session.previewCanvas.height = th;
+  const ctx = session.previewCanvas.getContext("2d");
+  if (!ctx) return;
+  ctx.drawImage(sourceVideo, 0, 0, tw, th);
+  session.previewCanvas.hidden = false;
+  if (session.previewImg) session.previewImg.hidden = true;
+  session.frameWrap.style.aspectRatio = `${tw} / ${th}`;
+}
+
+function stopVideoLivePreviewLoop(blockId) {
+  const session = videoLiveSessions.get(blockId);
+  if (!session?.previewRafId) return;
+  cancelAnimationFrame(session.previewRafId);
+  session.previewRafId = null;
+}
+
+/**
+ * @param {{ id: string, values?: Record<string, string> }} block
+ */
+function startVideoLivePreviewLoop(block) {
+  const session = videoLiveSessions.get(block.id);
+  if (!session || session.previewRafId != null) return;
+  const tick = () => {
+    const s = videoLiveSessions.get(block.id);
+    if (!s || !blockMediaStreams.get(block.id)?.active) {
+      if (s) s.previewRafId = null;
+      return;
+    }
+    if (!s.previewImg?.getAttribute("src")) {
+      drawVideoLiveInterimPreview(s.sourceVideo, block);
+    }
+    s.previewRafId = requestAnimationFrame(tick);
+  };
+  session.previewRafId = requestAnimationFrame(tick);
+}
+
+function getVideoLiveSourceVideo(blockId) {
+  return videoLiveSessions.get(blockId)?.sourceVideo ?? null;
+}
+
+/**
+ * @param {{ values?: Record<string, string> }} block
+ */
+async function acquireVideoLiveMediaStream(block) {
+  const source = String(block.values?.videoSource ?? "camera").trim();
+  if (source === "display") {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error("Screen sharing is not available in this browser.");
+    }
+    return navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  }
+  const vdev = String(block.values?.device ?? "").trim();
+  const videoConstraint = vdev ? { deviceId: { exact: vdev } } : { facingMode: "user" };
+  return navigator.mediaDevices.getUserMedia({ video: videoConstraint, audio: false });
+}
+
+function handleVideoLiveTrackEnded(blockId) {
+  const session = videoLiveSessions.get(blockId);
+  stopVideoLiveFrameSampler(blockId);
+  stopBlockMedia(blockId);
+  stopVideoLivePreviewLoop(blockId);
+  if (session) {
+    session.sourceVideo.srcObject = null;
+    session.previewImg?.removeAttribute("src");
+    if (session.previewCanvas) {
+      const ctx = session.previewCanvas.getContext("2d");
+      ctx?.clearRect(0, 0, session.previewCanvas.width, session.previewCanvas.height);
+      session.previewCanvas.hidden = true;
+    }
+    if (session.previewImg)     session.previewImg.hidden = true;
+    session.syncCaptureUi?.(false);
+    if (session.noteEl) {
+      session.noteEl.textContent = "Capture ended (browser or user stopped sharing).";
+    }
+  }
+}
+
+/**
+ * @param {{ id: string, values?: Record<string, string> }} block
+ * @param {MediaStream} stream
+ */
+function bindVideoLiveMediaStream(block, stream) {
+  stopVideoLiveFrameSampler(block.id);
+  const prev = blockMediaStreams.get(block.id);
+  if (prev && prev !== stream) {
+    prev.getTracks().forEach((t) => t.stop());
+  }
+  blockMediaStreams.set(block.id, stream);
+
+  let session = videoLiveSessions.get(block.id);
+  if (!session) {
+    const sourceVideo = document.createElement("video");
+    sourceVideo.muted = true;
+    sourceVideo.playsInline = true;
+    sourceVideo.setAttribute("playsinline", "");
+    session = {
+      sourceVideo,
+      previewImg: null,
+      previewCanvas: null,
+      frameWrap: null,
+      previewRafId: null,
+      noteEl: null,
+      syncCaptureUi: null,
+    };
+    videoLiveSessions.set(block.id, session);
+  }
+
+  session.sourceVideo.srcObject = stream;
+  void session.sourceVideo.play().catch(() => {});
+
+  const track = stream.getVideoTracks()[0];
+  if (track) {
+    track.addEventListener(
+      "ended",
+      () => {
+        handleVideoLiveTrackEnded(block.id);
+      },
+      { once: true },
+    );
+  }
+
+  session.syncCaptureUi?.(true);
+  const source = String(block.values?.videoSource ?? "camera").trim();
+  if (session.noteEl) {
+    session.noteEl.textContent =
+      source === "display"
+        ? "Screen sharing active — preview shows encoded frames sent to the model."
+        : "Camera active — preview shows encoded frames sent to the model.";
+  }
+
+  startVideoLivePreviewLoop(block);
+  if (state.running && state.runMode === "realtime") {
+    startVideoLiveFrameSampler(block);
+  }
+}
+
+/**
+ * @param {{ id: string, values?: Record<string, string> }} block
+ */
+async function startVideoLiveCapture(block) {
+  const stream = await acquireVideoLiveMediaStream(block);
+  bindVideoLiveMediaStream(block, stream);
+  return stream;
+}
+
+async function ensureVideoLiveCapturesForRun() {
+  const blocks = state.blocks.filter((b) => b.role === "input" && b.typeId === "video-live");
+  for (const block of blocks) {
+    if (blockMediaStreams.get(block.id)?.active) continue;
+    try {
+      await startVideoLiveCapture(block);
+    } catch (err) {
+      console.warn("Auto video-live capture failed", block.id, err);
+      const source = String(block.values?.videoSource ?? "camera").trim();
+      showToast(
+        source === "display"
+          ? "Screen share was cancelled or denied."
+          : "Camera permission denied — allow access to stream video to the model.",
+      );
+    }
+  }
+}
+
+function getVideoLiveCaptureInitPromise() {
+  if (!videoLiveCaptureInitPromise) {
+    videoLiveCaptureInitPromise = ensureVideoLiveCapturesForRun();
+  }
+  return videoLiveCaptureInitPromise;
+}
+
+function resetVideoLiveCaptureInitPromise() {
+  videoLiveCaptureInitPromise = null;
+}
+
+function stopVideoLiveCaptureSession(blockId) {
+  stopVideoLiveFrameSampler(blockId);
+  stopVideoLivePreviewLoop(blockId);
+  stopBlockMedia(blockId);
+  const session = videoLiveSessions.get(blockId);
+  if (!session) return;
+  session.sourceVideo.srcObject = null;
+  session.previewImg?.removeAttribute("src");
+  if (session.previewImg) session.previewImg.hidden = true;
+  if (session.previewCanvas) {
+    const ctx = session.previewCanvas.getContext("2d");
+    ctx?.clearRect(0, 0, session.previewCanvas.width, session.previewCanvas.height);
+    session.previewCanvas.hidden = true;
+  }
+  session.syncCaptureUi?.(false);
+}
+
+/**
+ * @param {string} blockId
+ * @param {Partial<VideoLiveSession>} ui
+ */
+function registerVideoLiveSessionUi(blockId, ui) {
+  const prev = videoLiveSessions.get(blockId);
+  if (prev) {
+    stopVideoLivePreviewLoop(blockId);
+    videoLiveSessions.set(blockId, {
+      ...prev,
+      ...ui,
+      previewRafId: null,
+    });
+  } else {
+    const sourceVideo = document.createElement("video");
+    sourceVideo.muted = true;
+    sourceVideo.playsInline = true;
+    sourceVideo.setAttribute("playsinline", "");
+    videoLiveSessions.set(blockId, {
+      sourceVideo,
+      previewImg: ui.previewImg ?? null,
+      previewCanvas: ui.previewCanvas ?? null,
+      frameWrap: ui.frameWrap ?? null,
+      previewRafId: null,
+      noteEl: ui.noteEl ?? null,
+      syncCaptureUi: ui.syncCaptureUi ?? null,
+    });
+  }
+  const block = state.blocks.find((b) => b.id === blockId);
+  const stream = blockMediaStreams.get(blockId);
+  if (block && stream?.active) {
+    bindVideoLiveMediaStream(block, stream);
+  }
+}
+
+/**
+ * @param {{ values?: Record<string, string> }} block
+ * @returns {number}
+ */
+function videoLiveFrameIntervalMs(block) {
+  const key = String(block.values?.frameRate ?? "1").trim();
+  return VIDEO_LIVE_FRAME_INTERVAL_MS[key] ?? VIDEO_LIVE_FRAME_INTERVAL_MS["1"];
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {{ id: string, values?: Record<string, string> }} block
+ * @param {{ force?: boolean, seq?: number }} [options]
+ */
+async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
+  const def = findDef("input", "video-live");
+  const partTitle = def ? def.title : "video-live";
+  const label = `Input · video-live (${block.id}) — ${partTitle}`;
+  const video = getVideoLiveSourceVideo(block.id);
+  const stream = blockMediaStreams.get(block.id);
+  if (!video || !stream || !stream.active) {
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(No live capture active — allow camera or screen sharing when Run starts.)`,
+    );
+    return;
+  }
+
+  let captured;
+  try {
+    captured = await captureVideoLiveFrame(video);
+  } catch (err) {
+    console.warn("Video frame capture failed", err);
+    sendRealtimeUserTextItem(dc, `${label}\n(Video frame capture failed in the browser.)`);
+    return;
+  }
+  if (!captured) {
+    sendRealtimeUserTextItem(dc, `${label}\n(Capture is active but no video frame was ready yet.)`);
+    return;
+  }
+
+  const entry = videoLiveFrameTimers.get(block.id);
+  if (!options.force && entry?.lastHash === captured.hash) {
+    return;
+  }
+
+  let encoded;
+  try {
+    encoded = await encodeImageBlobForRealtimeDataUrl(captured.blob);
+  } catch (err) {
+    console.warn("Video frame encode failed", err);
+    sendRealtimeUserTextItem(dc, `${label}\n(Video frame encode failed in the browser.)`);
+    return;
+  }
+  if (!encoded) {
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(Frame too large for the Realtime data channel at full resolution.)`,
+    );
+    return;
+  }
+
+  if (entry) entry.lastHash = captured.hash;
+
+  revokeVideoLivePreviewObjectUrl(block.id);
+  const previewUrl = URL.createObjectURL(encoded.blob);
+  if (entry) entry.lastPreviewObjectUrl = previewUrl;
+  applyVideoLivePreviewDisplay(block.id, previewUrl, captured.width, captured.height);
+
+  const src =
+    String(block.values?.videoSource ?? "camera").trim() === "display" ? "screen" : "camera";
+  const seq = options.seq ? ` #${options.seq}` : "";
+  const inputText = `${label}${seq} (${src}, live frame)`;
+
+  /** @type {{ type: string, text?: string, image_url?: string, detail?: string }[]} */
+  const content = [
+    { type: "input_text", text: inputText },
+    { type: "input_image", image_url: encoded.dataUrl, detail: "high" },
+  ];
+
+  try {
+    console.debug("[workshop] video-live frame send", {
+      width: captured.width,
+      height: captured.height,
+      dataUrlLen: encoded.dataUrl.length,
+    });
+    dc.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content,
+        },
+      }),
+    );
+  } catch (err) {
+    console.warn("Realtime video-live frame send failed", err);
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(Video frame could not be sent on the data channel — try a lower frame rate.)`,
+    );
+  }
+}
+
+function stopVideoLiveFrameSampler(blockId) {
+  const entry = videoLiveFrameTimers.get(blockId);
+  if (!entry) return;
+  revokeVideoLivePreviewObjectUrl(blockId);
+  clearInterval(entry.timerId);
+  videoLiveFrameTimers.delete(blockId);
+}
+
+function stopAllVideoLiveFrameSamplers() {
+  for (const blockId of [...videoLiveFrameTimers.keys()]) {
+    stopVideoLiveFrameSampler(blockId);
+  }
+}
+
+/**
+ * @param {{ id: string, values?: Record<string, string> }} block
+ */
+function startVideoLiveFrameSampler(block) {
+  stopVideoLiveFrameSampler(block.id);
+  const dc = realtimeDataChannel;
+  if (!state.running || state.runMode !== "realtime" || !dc || dc.readyState !== "open") return;
+  if (!blockMediaStreams.get(block.id)) return;
+
+  const intervalMs = videoLiveFrameIntervalMs(block);
+  let seq = 0;
+  let inFlight = false;
+
+  const tick = async () => {
+    if (inFlight) return;
+    const dcNow = realtimeDataChannel;
+    if (!state.running || state.runMode !== "realtime" || !dcNow || dcNow.readyState !== "open") return;
+    if (!blockMediaStreams.get(block.id)) return;
+    inFlight = true;
+    seq += 1;
+    try {
+      await sendRealtimeVideoLiveFrame(dcNow, block, { seq });
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const timerId = window.setInterval(() => {
+    void tick();
+  }, intervalMs);
+  videoLiveFrameTimers.set(block.id, { timerId, lastHash: "", lastPreviewObjectUrl: null });
+  void tick();
+}
+
+function startAllVideoLiveFrameSamplers() {
+  for (const b of state.blocks) {
+    if (b.role === "input" && b.typeId === "video-live" && blockMediaStreams.get(b.id)) {
+      startVideoLiveFrameSampler(b);
+    }
   }
 }
 
@@ -1293,6 +1798,7 @@ async function mergeRealtimeBootstrapUserItems(dc, bootstrapEvents) {
   for (const b of state.blocks) {
     if (b.role !== "input") continue;
     if (b.typeId === "audio-live") continue;
+    if (b.typeId === "video-live") continue;
     if (b.typeId === "audio-rec") {
       await sendRealtimeAudioRecBlock(dc, b);
       continue;
@@ -1361,6 +1867,41 @@ function releasePttCtrlHotkey() {
   setRealtimeLocalMicEnabled(false);
 }
 
+/** Reset push-to-talk UI and mic state when a Realtime run ends. */
+function resetAudioLivePttUiOnRunStop() {
+  pttCtrlMicEngaged = false;
+  audioLivePttToggleState.clear();
+  setRealtimeLocalMicEnabled(false);
+
+  if (lastAudioLivePttUi?.mode === "hold" && typeof lastAudioLivePttUi.setHoldVisual === "function") {
+    try {
+      lastAudioLivePttUi.setHoldVisual(false);
+    } catch (_) {
+      /* ignore */
+    }
+  } else if (lastAudioLivePttUi?.mode === "toggle" && typeof lastAudioLivePttUi.syncToggle === "function") {
+    try {
+      lastAudioLivePttUi.syncToggle();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  for (const b of state.blocks) {
+    if (b.role !== "input" || b.typeId !== "audio-live" || b.values.turnTaking !== "ptt") continue;
+    const card = document.querySelector(`[data-block-id="${CSS.escape(b.id)}"]`);
+    const bar = card?.querySelector(".ptt-live-bar");
+    const btn = bar?.querySelector(".ptt-live-btn");
+    const iconWrap = bar?.querySelector(".ptt-live-btn-icon");
+    if (btn) {
+      btn.classList.remove("is-transmitting");
+      btn.setAttribute("aria-pressed", "false");
+    }
+    if (iconWrap) iconWrap.innerHTML = PTT_ICON_MIC_MUTED;
+    if (bar) syncAudioLivePttBar(b, bar, { transmitting: false });
+  }
+}
+
 function isTypingInField(el) {
   if (!el || el.nodeType !== 1) return false;
   if (el.isContentEditable) return true;
@@ -1375,7 +1916,14 @@ async function stopRealtimeRun() {
     dynamicUiWidgetSyncTimer = null;
   }
   pendingDynamicUiWidgetPatch = null;
-  releasePttCtrlHotkey();
+  resetAudioLivePttUiOnRunStop();
+  stopAllVideoLiveFrameSamplers();
+  for (const b of state.blocks) {
+    if (b.role === "input" && b.typeId === "video-live") {
+      stopVideoLiveCaptureSession(b.id);
+    }
+  }
+  resetVideoLiveCaptureInitPromise();
   realtimeRunAutoStop = false;
   realtimeDataChannel = null;
   if (realtimeLocalStream) {
@@ -1393,6 +1941,9 @@ async function stopRealtimeRun() {
   lockPalette(false);
   renderMeta();
   syncRunModuleChrome();
+  if (state.blocks.some((b) => b.role === "input" && b.typeId === "video-live")) {
+    renderModuleEditor();
+  }
 }
 
 async function startRealtimeRun() {
@@ -1456,7 +2007,7 @@ async function startRealtimeRun() {
       workshopSessionIds = null;
     }
 
-    realtimeRunAutoStop = !pipelineHasLiveAudioInput();
+    realtimeRunAutoStop = !pipelineKeepsRealtimeSessionOpen();
     stopImageGenerationProgressUi();
     for (const b of state.blocks) {
       if (b.role === "output" && b.typeId === "text") {
@@ -1535,7 +2086,7 @@ async function startRealtimeRun() {
         } catch (e) {
           console.warn("Realtime bootstrap merge failed", e);
         }
-        if (!pipelineHasLiveAudioInput()) {
+        if (!pipelineKeepsRealtimeSessionOpen()) {
           try {
             if (dc.readyState === "open") {
               dc.send(JSON.stringify({ type: "response.create" }));
@@ -1543,6 +2094,14 @@ async function startRealtimeRun() {
           } catch (err) {
             console.warn("Realtime response.create send failed", err);
           }
+        } else {
+          try {
+            await getVideoLiveCaptureInitPromise();
+            renderModuleEditor();
+          } catch (err) {
+            console.warn("Video-live auto capture failed during bootstrap", err);
+          }
+          startAllVideoLiveFrameSamplers();
         }
       })();
     };
@@ -1591,6 +2150,9 @@ async function startRealtimeRun() {
     lockPalette(true);
     renderMeta();
     syncRunModuleChrome();
+    if (state.blocks.some((b) => b.role === "input" && b.typeId === "video-live")) {
+      void getVideoLiveCaptureInitPromise().then(() => renderModuleEditor());
+    }
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -1614,7 +2176,7 @@ async function startRealtimeRun() {
     await pc.setRemoteDescription(answer);
 
     showToast(
-      pipelineHasLiveAudioInput()
+      pipelineKeepsRealtimeSessionOpen()
         ? "Realtime session connected — click Running or Esc when you are done."
         : "Realtime session connected — the run will end automatically when the model response completes.",
     );
@@ -2218,8 +2780,9 @@ function stopBlockRecorder(blockId) {
 }
 
 function stopBlockCapture(blockId) {
-  stopBlockMedia(blockId);
+  stopVideoLiveCaptureSession(blockId);
   stopBlockRecorder(blockId);
+  videoLiveSessions.delete(blockId);
 }
 
 function findBlock(role, typeId) {
@@ -3083,6 +3646,107 @@ function renderCameraPreviewField(field, block, disabled, wrap) {
   wrap.appendChild(row);
 }
 
+function renderVideoLiveCaptureField(field, block, disabled, wrap) {
+  const row = document.createElement("div");
+  row.className = "camera-preview video-live-preview";
+
+  const frameWrap = document.createElement("div");
+  frameWrap.className = "video-live-preview-frame";
+  row.appendChild(frameWrap);
+
+  const previewCanvas = document.createElement("canvas");
+  previewCanvas.className = "video-live-preview-canvas";
+  previewCanvas.hidden = true;
+  frameWrap.appendChild(previewCanvas);
+
+  const previewImg = document.createElement("img");
+  previewImg.className = "video-live-preview-img";
+  previewImg.alt = "Encoded frame preview (same JPEG sent to the model)";
+  previewImg.hidden = true;
+  frameWrap.appendChild(previewImg);
+
+  const sourceVideo = document.createElement("video");
+  sourceVideo.className = "video-live-source-video";
+  sourceVideo.muted = true;
+  sourceVideo.playsInline = true;
+  sourceVideo.setAttribute("playsinline", "");
+  row.appendChild(sourceVideo);
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "camera-preview-actions";
+
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "camera-preview-btn";
+  start.textContent = "Start capture";
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "camera-preview-btn camera-preview-secondary";
+  stop.textContent = "Stop";
+  stop.disabled = true;
+  btnRow.appendChild(start);
+  btnRow.appendChild(stop);
+  row.appendChild(btnRow);
+
+  const note = document.createElement("p");
+  note.className = "field-hint";
+  note.textContent = state.running
+    ? "Connecting — allow camera or screen access when prompted."
+    : "Capture starts automatically when Run connects. Preview matches encoded frames sent to the model.";
+  row.appendChild(note);
+
+  const syncCaptureUi = (active) => {
+    start.disabled = disabled || active;
+    stop.disabled = disabled || !active;
+  };
+
+  registerVideoLiveSessionUi(block.id, {
+    sourceVideo,
+    previewImg,
+    previewCanvas,
+    frameWrap,
+    noteEl: note,
+    syncCaptureUi,
+  });
+
+  start.addEventListener("click", async () => {
+    if (disabled) return;
+    stopVideoLiveCaptureSession(block.id);
+    previewImg.removeAttribute("src");
+    previewImg.hidden = true;
+    previewCanvas.hidden = true;
+    note.textContent = "Requesting capture…";
+    try {
+      await startVideoLiveCapture(block);
+      const source = String(block.values?.videoSource ?? "camera").trim();
+      note.textContent =
+        source === "display"
+          ? "Screen sharing active — preview shows encoded frames sent to the model."
+          : "Camera active — preview shows encoded frames sent to the model.";
+    } catch {
+      const source = String(block.values?.videoSource ?? "camera").trim();
+      note.textContent =
+        source === "display"
+          ? "Screen share denied or cancelled."
+          : "Camera permission denied or unavailable.";
+      syncCaptureUi(false);
+    }
+  });
+
+  stop.addEventListener("click", () => {
+    stopVideoLiveCaptureSession(block.id);
+    previewImg.removeAttribute("src");
+    previewImg.hidden = true;
+    previewCanvas.hidden = true;
+    syncCaptureUi(false);
+    note.textContent = "Capture stopped.";
+  });
+
+  syncCaptureUi(!!blockMediaStreams.get(block.id)?.active);
+
+  wrap.appendChild(row);
+}
+
 /** @typedef {{ label: string, body: string, empty?: boolean }} ChatTurnPreview */
 
 /** @typedef {{ systemParts: { label: string, body: string }[], userTurns: ChatTurnPreview[] }} ConversationSnapshot */
@@ -3208,9 +3872,8 @@ function gatherConversationSnapshotForTextOutput() {
             : "(empty URL)";
         } else {
           const ready = blob instanceof Blob && blob.size > 0;
-          const scale512 = imageInputScaleTo512Enabled(b);
           body = ready
-            ? `${stub || "image"} — ${blob.size} bytes${scale512 ? ", wird auf 512 px für Realtime skaliert" : ", wird für Realtime komprimiert"}`
+            ? `${stub || "image"} — ${blob.size} bytes, volle Auflösung für Realtime`
             : stub
               ? `${stub} — pick the file again before Run if vision is missing`
               : "(no file selected)";
@@ -4500,14 +5163,21 @@ function syncAudioLivePttBar(block, bar, ctx = {}) {
   if (!btn || !labelEl) return;
   const running = state.running;
   const micReady = state.runMode === "realtime" && !!realtimeLocalStream;
-  const transmitting =
+  let transmitting =
     ctx.transmitting ??
     (block.values.pttStyle === "toggle"
       ? audioLivePttToggleState.get(block.id) === true
       : btn.classList.contains("is-transmitting"));
+  if (!running) transmitting = false;
   labelEl.textContent = formatAudioLivePttButtonLabel(block, { transmitting, running, micReady });
   btn.setAttribute("aria-label", formatAudioLivePttButtonAriaLabel(block, { transmitting, running, micReady }));
   btn.disabled = !running;
+  if (!running) {
+    btn.classList.remove("is-transmitting");
+    btn.setAttribute("aria-pressed", "false");
+    const iconWrap = bar.querySelector(".ptt-live-btn-icon");
+    if (iconWrap) iconWrap.innerHTML = PTT_ICON_MIC_MUTED;
+  }
 }
 
 function syncDynamicUiRunWidgetSync() {
@@ -4811,6 +5481,8 @@ function renderModuleCard(block, container) {
       renderDropzoneField(field, block, locked, wrap);
     } else if (field.type === "camera_preview") {
       renderCameraPreviewField(field, block, locked, wrap);
+    } else if (field.type === "video_live_capture") {
+      renderVideoLiveCaptureField(field, block, locked, wrap);
     } else if (field.type === "file") {
       const inp = document.createElement("input");
       inp.type = "file";
@@ -4918,7 +5590,7 @@ function renderEditorSection(role, list, root) {
     const hint = document.createElement("p");
     hint.className = "input-section-actions-hint";
     hint.textContent =
-      "During a Realtime run, push the latest input module state (text, forms, images, audio clip, dynamic UI) to the model in pipeline order.";
+      "During a Realtime run, push the latest input module state (text, forms, images, audio clip, live video frame, dynamic UI) to the model in pipeline order.";
     bar.appendChild(btn);
     bar.appendChild(hint);
     details.appendChild(bar);
@@ -5600,8 +6272,14 @@ function handleRealtimeDataChannelMessage(raw) {
   if (msg.type === "error") {
     const err = msg.error && typeof msg.error === "object" ? msg.error : {};
     const m = String(/** @type {{ message?: string }} */ (err).message || msg.message || "").trim();
-    console.warn("Realtime error event", msg);
-    if (m) showToast(`Realtime: ${m.slice(0, 220)}`);
+    const param = String(/** @type {{ param?: string }} */ (err).param || "").trim();
+    const code = String(/** @type {{ code?: string }} */ (err).code || "").trim();
+    console.warn("Realtime error event", { type: msg.type, event_id: msg.event_id, code, param, message: m, error: err });
+    const hint =
+      param.includes("image_url") || m.includes("image_url")
+        ? " (image may exceed the Realtime data-channel size limit at full resolution)"
+        : "";
+    if (m) showToast(`Realtime: ${m.slice(0, 200)}${hint}`);
     return;
   }
   if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
@@ -5658,7 +6336,7 @@ function updateRunChrome() {
   fab.setAttribute(
     "aria-label",
     running
-      ? pipelineHasLiveAudioInput()
+      ? pipelineKeepsRealtimeSessionOpen()
         ? "Realtime session active — click to stop when you are done"
         : "Realtime run — click to stop, or wait for the model to finish"
       : "Validate plan and start Realtime (WebRTC)",
