@@ -168,8 +168,13 @@ const VIDEO_LIVE_FRAME_INTERVAL_MS = {
   "2": 500,
 };
 
-/** @type {Map<string, { recorder: MediaRecorder, chunks: BlobPart[], statusEl: HTMLElement | null }>} */
-const blockMediaRecorders = new Map();
+/** @type {Map<string, { stop: () => Promise<unknown> }>} */
+const blockPcmCaptureSessions = new Map();
+
+/** @returns {typeof globalThis.workshopAudioCapture | null} */
+function audioCaptureApi() {
+  return typeof globalThis !== "undefined" ? globalThis.workshopAudioCapture || null : null;
+}
 
 /** Push-to-talk toggle: block id → mic unmuted (Realtime: syncs to track.enabled). */
 const audioLivePttToggleState = new Map();
@@ -348,7 +353,7 @@ const FORM_SCHEMA = {
         key: "_hint",
         label: "",
         type: "hint",
-        hint: "Recording produces a blob your backend forwards as `file`; duration is derived automatically.",
+        hint: "Recording captures PCM in the browser (most reliable). For uploads, prefer WAV or MP3.",
       },
     ],
   },
@@ -674,7 +679,7 @@ const FORM_SCHEMA = {
 };
 
 const state = {
-  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _runAudioDataUrl?: string, _runAudioGenerating?: boolean, _formRunAnswers?: Record<string, string>, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown>, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }[]} */
+  /** @type {{ id: string, role: 'input'|'process'|'output', typeId: string, values: Record<string, string>, runPreview?: string, _transcriptLog?: { key: string, role: 'user'|'assistant'|'system', label: string, body: string }[], _textOutputShowSystem?: boolean, _runImageDataUrl?: string, _runImageGenerating?: boolean, _runAudioDataUrl?: string, _runAudioGenerating?: boolean, _formRunAnswers?: Record<string, string>, _runDynamicUiPrompt?: string, _runDynamicUiData?: Record<string, unknown>, _runDynamicUiSpecOverlay?: Record<string, unknown>, _recordedPcm16?: Int16Array | null, _recordedPcmSampleRate?: number, _inputImageBlob?: Blob | null }[]} */
   blocks: [],
   /** Collapsible sections in the pipeline editor */
   sectionOpen: { input: true, process: true, output: true },
@@ -884,20 +889,33 @@ function uint8ToBase64(bytes) {
 }
 
 /**
- * Realtime `input_audio` defaults to PCM 16-bit 24kHz mono.
- * @param {Blob} blob
+ * @param {RTCDataChannel} dc
+ * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, _recordedPcm16?: Int16Array | null }} block
  */
-async function blobToRealtimeInputAudioBase64(blob) {
-  const arrayBuffer = await blob.arrayBuffer();
-  const ctx = new AudioContext();
+async function sendRealtimeAudioRecBlock(dc, block) {
+  const label = `Input · audio-rec (${block.id})`;
+  const W = audioCaptureApi();
+  if (!W) {
+    sendRealtimeUserTextItem(dc, `${label}\n(Audio capture module failed to load.)`);
+    return;
+  }
+  const pcm = W.hasRecordedPcm(block) ? block._recordedPcm16 : null;
+  if (!pcm || pcm.length < 1) {
+    sendRealtimeUserTextItem(
+      dc,
+      `${label}\n(No recorded or uploaded audio in this browser session — record or choose WAV/MP3 before Run.)`,
+    );
+    return;
+  }
   try {
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-    const mono = float32MonoFromAudioBuffer(audioBuffer);
-    const resampled = resampleLinear(mono, audioBuffer.sampleRate, 24000);
-    const pcm = floatTo16BitPCM(resampled);
-    return uint8ToBase64(pcm);
-  } finally {
-    await ctx.close();
+    await W.sendPcmToRealtimeDataChannel(dc, pcm, label, {
+      sendText: sendRealtimeUserTextItem,
+      maxBase64Chars: REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS,
+    });
+  } catch (e) {
+    console.warn("Could not send audio to Realtime", e);
+    showToast(String(/** @type {Error} */ (e).message || e).slice(0, 200));
+    sendRealtimeUserTextItem(dc, `${label}\n(Audio could not be sent to Realtime.)`);
   }
 }
 
@@ -995,7 +1013,7 @@ function isHttpsImageUrl(url) {
 
 /**
  * @param {RTCDataChannel} dc
- * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, formItems?: object[], dynamicUiCommitted?: string, _recordedAudioBlob?: Blob | null, _inputImageBlob?: Blob | null }} block
+ * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, formItems?: object[], dynamicUiCommitted?: string, _inputImageBlob?: Blob | null }} block
  */
 async function pushSingleInputModuleToRealtime(dc, block) {
   const def = findDef(block.role, block.typeId);
@@ -1742,52 +1760,6 @@ function startAllVideoLiveFrameSamplers() {
 }
 
 /**
- * @param {RTCDataChannel} dc
- * @param {{ id: string, role: string, typeId: string, values: Record<string, string>, _recordedAudioBlob?: Blob | null }} block
- */
-async function sendRealtimeAudioRecBlock(dc, block) {
-  const label = `Input · audio-rec (${block.id})`;
-  const blob = block._recordedAudioBlob;
-  if (!blob || blob.size < 1) {
-    sendRealtimeUserTextItem(
-      dc,
-      `${label}\n(No recorded or uploaded audio in this browser session — record or choose a file before Run.)`,
-    );
-    return;
-  }
-  let b64;
-  try {
-    b64 = await blobToRealtimeInputAudioBase64(blob);
-  } catch (e) {
-    console.warn("Could not encode audio for Realtime", e);
-    showToast("Audio could not be decoded for Realtime — try WAV/MP3 or a shorter clip.");
-    sendRealtimeUserTextItem(dc, `${label}\n(Audio decode failed in the browser.)`);
-    return;
-  }
-  if (b64.length > REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS) {
-    showToast("Audio clip too large for Realtime — use a shorter recording.");
-    sendRealtimeUserTextItem(dc, `${label}\n(Attached audio exceeded the browser size guard.)`);
-    return;
-  }
-  dc.send(
-    JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: `${label}\nUser audio is attached below as PCM 16-bit mono @ 24kHz (decoded in the browser from the recording or file).`,
-          },
-          { type: "input_audio", audio: b64 },
-        ],
-      },
-    }),
-  );
-}
-
-/**
  * Preserve pipeline input order: walk blocks and interleave `audio-rec` and file `input:image`
  * (client-attached bytes) with server bootstrap events.
  * @param {RTCDataChannel} dc
@@ -2520,8 +2492,10 @@ async function serializeBlockSnapshotRowForExport(block) {
   if (block._inputImageBlob instanceof Blob && block._inputImageBlob.size > 0) {
     row._inputImageDataUrl = await readBlobAsDataUrl(block._inputImageBlob);
   }
-  if (block._recordedAudioBlob instanceof Blob && block._recordedAudioBlob.size > 0) {
-    row._recordedAudioDataUrl = await readBlobAsDataUrl(block._recordedAudioBlob);
+  const W = audioCaptureApi();
+  if (W && W.hasRecordedPcm(block)) {
+    row._recordedPcm16Base64 = W.int16ToBase64(block._recordedPcm16);
+    row._recordedPcmSampleRate = block._recordedPcmSampleRate || W.REALTIME_SAMPLE_RATE;
   }
   return row;
 }
@@ -2577,13 +2551,20 @@ async function applyBlockSnapshotAssets(row, block) {
       }
     }
   }
-  if (typeof row._recordedAudioDataUrl === "string" && row._recordedAudioDataUrl.startsWith("data:")) {
-    const blob = await dataUrlToBlob(row._recordedAudioDataUrl);
-    if (blob && blob.size > 0) {
-      block._recordedAudioBlob = blob;
+  const W = audioCaptureApi();
+  if (
+    W &&
+    typeof row._recordedPcm16Base64 === "string" &&
+    row._recordedPcm16Base64.length > 0
+  ) {
+    try {
+      const pcm = W.base64ToInt16(row._recordedPcm16Base64);
+      W.setRecordedPcm(block, pcm, Number(row._recordedPcmSampleRate) || W.REALTIME_SAMPLE_RATE);
       if (!String(block.values.recordingStub || "").trim()) {
-        block.values.recordingStub = "imported-audio";
+        block.values.recordingStub = "imported-pcm.wav";
       }
+    } catch {
+      /* ignore corrupt snapshot audio */
     }
   }
 }
@@ -2766,17 +2747,15 @@ function stopBlockMedia(blockId) {
   blockMediaStreams.delete(blockId);
 }
 
+function stopBlockPcmCapture(blockId) {
+  const entry = blockPcmCaptureSessions.get(blockId);
+  if (!entry) return Promise.resolve();
+  blockPcmCaptureSessions.delete(blockId);
+  return entry.stop().catch(() => undefined);
+}
+
 function stopBlockRecorder(blockId) {
-  const entry = blockMediaRecorders.get(blockId);
-  if (!entry) return;
-  try {
-    if (entry.recorder && entry.recorder.state !== "inactive") {
-      entry.recorder.stop();
-    }
-  } catch (_) {
-    /* ignore */
-  }
-  blockMediaRecorders.delete(blockId);
+  return stopBlockPcmCapture(blockId);
 }
 
 function stopBlockCapture(blockId) {
@@ -2911,6 +2890,42 @@ async function ingestVectorKnowledgeFiles(block, files) {
   }
 }
 
+/**
+ * @param {typeof state.blocks[number]} block
+ * @param {File | null | undefined} file
+ * @param {HTMLElement | null} [statusEl]
+ */
+async function ingestAudioRecUpload(block, file, statusEl) {
+  const W = audioCaptureApi();
+  if (!file) {
+    if (W) W.clearRecordedPcm(block);
+    block.values.uploadStub = "";
+    if (statusEl) statusEl.textContent = "No file selected";
+    return;
+  }
+  if (!W) {
+    showToast("Audio capture module failed to load.");
+    if (statusEl) statusEl.textContent = "Audio module unavailable";
+    return;
+  }
+  block.values.uploadStub = file.name;
+  block.values.recordingStub = "";
+  W.clearRecordedPcm(block);
+  if (statusEl) statusEl.textContent = `Decoding ${file.name}…`;
+  try {
+    const pcm = await W.fileToPcm16(file);
+    W.setRecordedPcm(block, pcm);
+    const dur = W.recordedDurationSec(block).toFixed(1);
+    if (statusEl) statusEl.textContent = `Ready: ${file.name} (${dur}s)`;
+    showToast(`Audio ready (${dur}s).`);
+  } catch (e) {
+    W.clearRecordedPcm(block);
+    block.values.uploadStub = "";
+    showToast("Could not decode file — try WAV/MP3 or record in the browser.");
+    if (statusEl) statusEl.textContent = "Decode failed — try WAV/MP3";
+  }
+}
+
 function renderDropzoneField(field, block, disabled, wrap) {
   const values = block.values;
   const zone = document.createElement("div");
@@ -2962,10 +2977,9 @@ function renderDropzoneField(field, block, disabled, wrap) {
     }
     values[field.key] = f ? f.name : "";
     sub.textContent = f ? `Selected: ${f.name}` : "No file selected";
-    if (block.typeId === "audio-rec") {
-      block._recordedAudioBlob = f || null;
-    }
-    if (block.typeId === "image") {
+    if (block.typeId === "audio-rec" && field.key === "uploadStub") {
+      void ingestAudioRecUpload(block, f || null, sub);
+    } else if (block.typeId === "image") {
       block._inputImageBlob = f || null;
     }
   });
@@ -3001,10 +3015,9 @@ function renderDropzoneField(field, block, disabled, wrap) {
     if (f) {
       values[field.key] = f.name;
       sub.textContent = `Selected: ${f.name}`;
-      if (block.typeId === "audio-rec") {
-        block._recordedAudioBlob = f;
-      }
-      if (block.typeId === "image") {
+      if (block.typeId === "audio-rec" && field.key === "uploadStub") {
+        void ingestAudioRecUpload(block, f, sub);
+      } else if (block.typeId === "image") {
         block._inputImageBlob = f;
       }
     }
@@ -3401,12 +3414,19 @@ function renderMediaDeviceField(field, block, disabled, wrap) {
 }
 
 function renderAudioRecordField(field, block, disabled, wrap) {
+  const W = audioCaptureApi();
   const row = document.createElement("div");
   row.className = "audio-recorder";
 
   const status = document.createElement("div");
   status.className = "audio-recorder-status";
-  status.textContent = block.values[field.key] ? `Stored: ${block.values[field.key]}` : "No recording yet";
+  if (W && W.hasRecordedPcm(block)) {
+    status.textContent = `Recorded: ${W.recordedDurationSec(block).toFixed(1)}s PCM (attached on Run)`;
+  } else if (block.values[field.key]) {
+    status.textContent = `Stored: ${block.values[field.key]}`;
+  } else {
+    status.textContent = "No recording yet";
+  }
 
   const btnRow = document.createElement("div");
   btnRow.className = "audio-recorder-actions";
@@ -3415,7 +3435,7 @@ function renderAudioRecordField(field, block, disabled, wrap) {
   start.type = "button";
   start.className = "audio-recorder-btn";
   start.textContent = "Record";
-  start.disabled = disabled;
+  start.disabled = disabled || !W?.canRecordMic();
 
   const stop = document.createElement("button");
   stop.type = "button";
@@ -3427,8 +3447,8 @@ function renderAudioRecordField(field, block, disabled, wrap) {
   play.type = "button";
   play.className = "audio-recorder-btn audio-recorder-secondary";
   play.textContent = "Play";
-  play.title = "Preview the clip stored for this run (same bytes as sent to Realtime)";
-  play.disabled = disabled || !block._recordedAudioBlob || !!blockMediaRecorders.get(block.id);
+  play.title = "Preview the PCM clip stored for this run (same data as sent to Realtime)";
+  play.disabled = disabled || !(W && W.hasRecordedPcm(block)) || !!blockPcmCaptureSessions.get(block.id);
 
   const audioPreview = document.createElement("audio");
   audioPreview.setAttribute("playsinline", "");
@@ -3454,19 +3474,20 @@ function renderAudioRecordField(field, block, disabled, wrap) {
 
   function syncPlayEnabled() {
     play.disabled =
-      disabled || !block._recordedAudioBlob || !!blockMediaRecorders.get(block.id);
+      disabled || !(W && W.hasRecordedPcm(block)) || !!blockPcmCaptureSessions.get(block.id);
   }
 
   play.addEventListener("click", async () => {
-    if (play.disabled || !block._recordedAudioBlob) return;
+    if (play.disabled || !W || !W.hasRecordedPcm(block)) return;
     try {
       revokePreviewUrl();
       audioPreview.pause();
-      previewObjectUrl = URL.createObjectURL(block._recordedAudioBlob);
+      const wav = W.pcm16ToWavBlob(block._recordedPcm16, block._recordedPcmSampleRate);
+      previewObjectUrl = URL.createObjectURL(wav);
       audioPreview.src = previewObjectUrl;
       await audioPreview.play();
     } catch {
-      showToast("Playback failed — this browser may not decode the clip format.");
+      showToast("Playback failed.");
     }
   });
 
@@ -3477,64 +3498,77 @@ function renderAudioRecordField(field, block, disabled, wrap) {
   row.appendChild(audioPreview);
   row.appendChild(status);
 
-  start.addEventListener("click", async () => {
-    if (disabled) return;
-    stopBlockRecorder(block.id);
+  start.addEventListener("click", () => {
+    if (disabled || !W) return;
+    if (!W.canRecordMic()) {
+      status.textContent = "Recording not supported — use file upload (WAV/MP3).";
+      return;
+    }
+
     revokePreviewUrl();
     audioPreview.removeAttribute("src");
     block.values[field.key] = "";
-    block._recordedAudioBlob = null;
+    block.values.uploadStub = "";
+    if (W) W.clearRecordedPcm(block);
     syncPlayEnabled();
     status.textContent = "Requesting microphone…";
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : MediaRecorder.isTypeSupported("audio/webm")
-          ? "audio/webm"
-          : "";
-      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-      const chunks = [];
-      rec.addEventListener("dataavailable", (e) => {
-        if (e.data.size) chunks.push(e.data);
-      });
-      rec.addEventListener("stop", () => {
-        stream.getTracks().forEach((t) => t.stop());
-        if (chunks.length) {
-          const ext = mime && mime.includes("mp4") ? "m4a" : "webm";
-          const name = `recording-${Date.now()}.${ext}`;
-          block.values[field.key] = name;
-          block._recordedAudioBlob = new Blob(chunks, { type: mime || "audio/mp4" });
-          status.textContent = `Recorded: ${name} (attached on Run)`;
-        } else {
-          status.textContent = "Recording empty — try again.";
-          block._recordedAudioBlob = null;
-        }
-        blockMediaRecorders.delete(block.id);
-        start.disabled = disabled;
-        stop.disabled = true;
-        syncPlayEnabled();
-      });
-      rec.start(200);
-      blockMediaRecorders.set(block.id, { recorder: rec, chunks, statusEl: status });
-      start.disabled = true;
-      stop.disabled = false;
-      play.disabled = true;
-    } catch {
-      status.textContent = "Microphone not available or denied.";
-      syncPlayEnabled();
+
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) {
+      status.textContent = "Web Audio not available.";
+      return;
     }
+    const captureContext = new AC();
+
+    void (async () => {
+      try {
+        await stopBlockPcmCapture(block.id);
+        await captureContext.resume();
+        const session = await W.startPcmRecording({ audioContext: captureContext });
+        blockPcmCaptureSessions.set(block.id, session);
+        start.disabled = true;
+        stop.disabled = false;
+        play.disabled = true;
+        status.textContent = "Recording…";
+      } catch (e) {
+        try {
+          await captureContext.close();
+        } catch {
+          /* ignore */
+        }
+        status.textContent = "Microphone not available or denied.";
+        syncPlayEnabled();
+        showToast(String(/** @type {Error} */ (e).message || e).slice(0, 160));
+      }
+    })();
   });
 
   stop.addEventListener("click", () => {
-    const entry = blockMediaRecorders.get(block.id);
-    if (entry && entry.recorder && entry.recorder.state !== "inactive") {
+    const session = blockPcmCaptureSessions.get(block.id);
+    if (!session) return;
+    blockPcmCaptureSessions.delete(block.id);
+    status.textContent = "Finalizing…";
+    void (async () => {
       try {
-        entry.recorder.stop();
-      } catch (_) {
-        /* ignore */
+        const result = await session.stop();
+        if (W && result.pcm.length > 0) {
+          W.setRecordedPcm(block, result.pcm, result.sampleRate);
+          const name = `recording-${Date.now()}.wav`;
+          block.values[field.key] = name;
+          status.textContent = `Recorded: ${result.durationSec.toFixed(1)}s (attached on Run)`;
+        } else {
+          if (W) W.clearRecordedPcm(block);
+          status.textContent = "Recording empty — try again.";
+        }
+      } catch {
+        status.textContent = "Recording failed — try again.";
+        showToast("Recording failed to finalize.");
+      } finally {
+        start.disabled = disabled;
+        stop.disabled = true;
+        syncPlayEnabled();
       }
-    }
+    })();
   });
 
   wrap.appendChild(row);
