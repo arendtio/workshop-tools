@@ -822,6 +822,18 @@ const KNOWLEDGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
 
 /**
+ * Tighter cap for live video frames. Large WebRTC data-channel payloads are often dropped
+ * silently (see openai/openai-agents-js#501); static file inputs keep the higher limit.
+ */
+const REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS = 480_000;
+
+const VIDEO_LIVE_SOURCE_READY_TIMEOUT_MS = 8000;
+
+/** Bumped when a sampler stops so in-flight async startup cannot double-send. */
+/** @type {Map<string, number>} */
+const videoLiveSamplerGeneration = new Map();
+
+/**
  * @param {AudioBuffer} ab
  * @returns {Float32Array}
  */
@@ -1149,6 +1161,86 @@ async function pushAllInputModulesToRealtime(dc) {
  * @param {number} maxChars
  * @returns {Promise<Blob>}
  */
+/**
+ * @param {HTMLVideoElement} video
+ * @param {number} [timeoutMs]
+ */
+async function waitForVideoLiveSourceReady(video, timeoutMs = VIDEO_LIVE_SOURCE_READY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  return video.videoWidth > 0 && video.videoHeight > 0;
+}
+
+/**
+ * Scale + recompress JPEG until a data URL fits (live video; WebRTC-safe sizes).
+ * @param {Blob} blob
+ * @param {number} maxChars
+ * @returns {Promise<{ blob: Blob, dataUrl: string, width: number, height: number } | null>}
+ */
+async function scaleAndCompressJpegForRealtimeDataUrl(blob, maxChars) {
+  if (!(blob instanceof Blob) || blob.size < 1) return null;
+  let bmp;
+  try {
+    bmp = await createImageBitmap(blob);
+  } catch (err) {
+    console.warn("scaleAndCompressJpegForRealtimeDataUrl: createImageBitmap failed", err);
+    const fallbackBlob = await reencodeJpegBlobUnderDataUrlCharLimit(blob, maxChars);
+    const dataUrl = await readBlobAsDataUrl(fallbackBlob);
+    if (!dataUrl.startsWith("data:image/") || dataUrl.length > maxChars) return null;
+    return { blob: fallbackBlob, dataUrl, width: 0, height: 0 };
+  }
+  try {
+    const scales = [1, 0.75, 0.5, 0.38, 0.28];
+    const qualities = [0.85, 0.72, 0.58, 0.45, 0.32];
+    /** @type {{ blob: Blob, dataUrl: string, width: number, height: number } | null} */
+    let smallest = null;
+    let smallestLen = Infinity;
+    for (const scale of scales) {
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      ctx.drawImage(bmp, 0, 0, w, h);
+      for (const q of qualities) {
+        const jpegBlob = await new Promise((res) => {
+          canvas.toBlob((b) => res(b instanceof Blob ? b : null), "image/jpeg", q);
+        });
+        if (!(jpegBlob instanceof Blob) || jpegBlob.size < 1) continue;
+        const du = await readBlobAsDataUrl(jpegBlob);
+        if (du.length <= maxChars) {
+          return { blob: jpegBlob, dataUrl: du, width: w, height: h };
+        }
+        if (du.length < smallestLen) {
+          smallestLen = du.length;
+          smallest = { blob: jpegBlob, dataUrl: du, width: w, height: h };
+        }
+      }
+    }
+    return smallest;
+  } finally {
+    bmp.close();
+  }
+}
+
+/**
+ * @param {Blob} blob
+ * @returns {Promise<{ blob: Blob, dataUrl: string, width: number, height: number } | null>}
+ */
+async function encodeVideoLiveFrameForRealtimeDataUrl(blob) {
+  const encoded = await scaleAndCompressJpegForRealtimeDataUrl(blob, REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS);
+  if (!encoded) return null;
+  if (encoded.dataUrl.length > REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS) return null;
+  return encoded;
+}
+
 async function reencodeJpegBlobUnderDataUrlCharLimit(blob, maxChars) {
   if (!(blob instanceof Blob) || blob.size < 1) return blob;
   const initial = await readBlobAsDataUrl(blob);
@@ -1330,7 +1422,7 @@ async function captureVideoLiveFrame(video) {
     hash = (hash * 31 + pixels[i] + pixels[i + 1] + pixels[i + 2]) | 0;
   }
   const blob = await new Promise((res) => {
-    canvas.toBlob((b) => res(b), "image/jpeg", 0.92);
+    canvas.toBlob((b) => res(b), "image/jpeg", 0.82);
   });
   if (!(blob instanceof Blob) || blob.size < 1) return null;
   return { blob, hash: String(hash), width: tw, height: th };
@@ -1447,6 +1539,7 @@ function handleVideoLiveTrackEnded(blockId) {
       session.noteEl.textContent = "Capture ended (browser or user stopped sharing).";
     }
   }
+  refreshVideoLiveTextOutputSeed(blockId);
 }
 
 /**
@@ -1503,6 +1596,7 @@ function bindVideoLiveMediaStream(block, stream) {
   }
 
   startVideoLivePreviewLoop(block);
+  refreshVideoLiveTextOutputSeed(block.id);
   if (state.running && state.runMode === "realtime") {
     startVideoLiveFrameSampler(block);
   }
@@ -1577,10 +1671,12 @@ function registerVideoLiveSessionUi(blockId, ui) {
       previewRafId: null,
     });
   } else {
-    const sourceVideo = document.createElement("video");
-    sourceVideo.muted = true;
-    sourceVideo.playsInline = true;
-    sourceVideo.setAttribute("playsinline", "");
+    const sourceVideo = ui.sourceVideo ?? document.createElement("video");
+    if (!ui.sourceVideo) {
+      sourceVideo.muted = true;
+      sourceVideo.playsInline = true;
+      sourceVideo.setAttribute("playsinline", "");
+    }
     videoLiveSessions.set(blockId, {
       sourceVideo,
       previewImg: ui.previewImg ?? null,
@@ -1646,7 +1742,7 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
 
   let encoded;
   try {
-    encoded = await encodeImageBlobForRealtimeDataUrl(captured.blob);
+    encoded = await encodeVideoLiveFrameForRealtimeDataUrl(captured.blob);
   } catch (err) {
     console.warn("Video frame encode failed", err);
     sendRealtimeUserTextItem(dc, `${label}\n(Video frame encode failed in the browser.)`);
@@ -1655,7 +1751,7 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
   if (!encoded) {
     sendRealtimeUserTextItem(
       dc,
-      `${label}\n(Frame too large for the Realtime data channel at full resolution.)`,
+      `${label}\n(Frame still too large for the Realtime data channel after compression.)`,
     );
     return;
   }
@@ -1665,12 +1761,18 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
   revokeVideoLivePreviewObjectUrl(block.id);
   const previewUrl = URL.createObjectURL(encoded.blob);
   if (entry) entry.lastPreviewObjectUrl = previewUrl;
-  applyVideoLivePreviewDisplay(block.id, previewUrl, captured.width, captured.height);
+  const previewW = encoded.width > 0 ? encoded.width : captured.width;
+  const previewH = encoded.height > 0 ? encoded.height : captured.height;
+  applyVideoLivePreviewDisplay(block.id, previewUrl, previewW, previewH);
 
   const src =
     String(block.values?.videoSource ?? "camera").trim() === "display" ? "screen" : "camera";
   const seq = options.seq ? ` #${options.seq}` : "";
-  const inputText = `${label}${seq} (${src}, live frame)`;
+  const sentRes =
+    encoded.width > 0 && encoded.height > 0 && (encoded.width !== captured.width || encoded.height !== captured.height)
+      ? `${encoded.width}×${encoded.height} (from ${captured.width}×${captured.height})`
+      : `${captured.width}×${captured.height}`;
+  const inputText = `${label}${seq} (${src}, live frame, ${sentRes})`;
 
   /** @type {{ type: string, text?: string, image_url?: string, detail?: string }[]} */
   const content = [
@@ -1680,9 +1782,12 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
 
   try {
     console.debug("[workshop] video-live frame send", {
-      width: captured.width,
-      height: captured.height,
+      captureWidth: captured.width,
+      captureHeight: captured.height,
+      sentWidth: encoded.width,
+      sentHeight: encoded.height,
       dataUrlLen: encoded.dataUrl.length,
+      blobKb: (encoded.blob.size / 1024).toFixed(1),
     });
     dc.send(
       JSON.stringify({
@@ -1694,6 +1799,13 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
         },
       }),
     );
+    appendVideoLiveFrameSentTranscript(block, {
+      seq: options.seq,
+      src,
+      sentRes,
+      kb: (encoded.blob.size / 1024).toFixed(1),
+      dataUrlLen: encoded.dataUrl.length,
+    });
   } catch (err) {
     console.warn("Realtime video-live frame send failed", err);
     sendRealtimeUserTextItem(
@@ -1704,6 +1816,7 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
 }
 
 function stopVideoLiveFrameSampler(blockId) {
+  videoLiveSamplerGeneration.set(blockId, (videoLiveSamplerGeneration.get(blockId) ?? 0) + 1);
   const entry = videoLiveFrameTimers.get(blockId);
   if (!entry) return;
   revokeVideoLivePreviewObjectUrl(blockId);
@@ -1726,11 +1839,13 @@ function startVideoLiveFrameSampler(block) {
   if (!state.running || state.runMode !== "realtime" || !dc || dc.readyState !== "open") return;
   if (!blockMediaStreams.get(block.id)) return;
 
+  const gen = videoLiveSamplerGeneration.get(block.id) ?? 0;
   const intervalMs = videoLiveFrameIntervalMs(block);
   let seq = 0;
   let inFlight = false;
 
   const tick = async () => {
+    if (videoLiveSamplerGeneration.get(block.id) !== gen) return;
     if (inFlight) return;
     const dcNow = realtimeDataChannel;
     if (!state.running || state.runMode !== "realtime" || !dcNow || dcNow.readyState !== "open") return;
@@ -1744,11 +1859,21 @@ function startVideoLiveFrameSampler(block) {
     }
   };
 
-  const timerId = window.setInterval(() => {
+  void (async () => {
+    const video = getVideoLiveSourceVideo(block.id);
+    if (video) {
+      const ready = await waitForVideoLiveSourceReady(video);
+      if (!ready) {
+        console.warn("[workshop] video-live source not ready before first frame", block.id);
+      }
+    }
+    if (videoLiveSamplerGeneration.get(block.id) !== gen) return;
+    const timerId = window.setInterval(() => {
+      void tick();
+    }, intervalMs);
+    videoLiveFrameTimers.set(block.id, { timerId, lastHash: "", lastPreviewObjectUrl: null });
     void tick();
-  }, intervalMs);
-  videoLiveFrameTimers.set(block.id, { timerId, lastHash: "", lastPreviewObjectUrl: null });
-  void tick();
+  })();
 }
 
 function startAllVideoLiveFrameSamplers() {
@@ -3917,6 +4042,32 @@ function gatherConversationSnapshotForTextOutput() {
           body,
           empty: src === "url" ? !url.startsWith("https://") : !(blob instanceof Blob && blob.size > 0),
         });
+      } else if (b.typeId === "video-live") {
+        const source = String(b.values?.videoSource ?? "camera").trim();
+        const srcLabel = source === "display" ? "Screen" : "Camera";
+        const fps = String(b.values?.frameRate ?? "1").trim() || "1";
+        const stream = blockMediaStreams.get(b.id);
+        if (stream?.active) {
+          body = `Live ${srcLabel}, ~${fps} fps — capture active; changed JPEG frames are sent to the model.`;
+        } else if (state.running) {
+          body = `Live ${srcLabel}, ~${fps} fps — allow camera or screen sharing when prompted.`;
+        } else {
+          body = `Live ${srcLabel}, ~${fps} fps — capture starts automatically when Run connects.`;
+        }
+        userTurns.push({
+          label: `Input · ${partTitle}`,
+          body,
+          empty: false,
+        });
+      } else if (b.typeId === "audio-live") {
+        body = state.running
+          ? "Live microphone — audio is streamed on the WebRTC track."
+          : "Live microphone — starts when Run connects.";
+        userTurns.push({
+          label: `Input · ${partTitle}`,
+          body,
+          empty: false,
+        });
       } else {
         const url = b.values.imageUrl && String(b.values.imageUrl).trim();
         const up =
@@ -4006,6 +4157,45 @@ function appendSystemTranscriptToTextOutputs(label, body, dedupeKey) {
     const log = ensureTranscriptLog(b);
     if (log.some((e) => e.key === dedupeKey)) continue;
     log.push({ ...entry });
+    rebuildRunPreviewFromLog(b);
+  }
+  syncOutputTextChatFromState();
+}
+
+/**
+ * @param {{ id: string }} block
+ * @param {{ seq?: number, src: string, sentRes: string, kb: string, dataUrlLen: number }} meta
+ */
+function appendVideoLiveFrameSentTranscript(block, meta) {
+  const seqBit = meta.seq != null ? ` #${meta.seq}` : "";
+  const body = `Frame${seqBit} — ${meta.src}, ${meta.sentRes}, ${meta.kb} KB, ${meta.dataUrlLen} chars data URL`;
+  appendSystemTranscriptToTextOutputs(
+    "Video · frame sent",
+    body,
+    `video-live-frame:${block.id}:${meta.seq ?? 0}`,
+  );
+}
+
+/** Refresh the seeded text-output line for a video-live block after capture state changes. */
+function refreshVideoLiveTextOutputSeed(blockId) {
+  const block = state.blocks.find((b) => b.id === blockId);
+  if (!block || block.typeId !== "video-live") return;
+  const inputs = state.blocks.filter((b) => b.role === "input");
+  const idx = inputs.findIndex((b) => b.id === blockId);
+  if (idx < 0) return;
+  const snap = gatherConversationSnapshotForTextOutput();
+  const u = snap.userTurns[idx];
+  if (!u) return;
+  const key = `pipeline-seed:${blockId}`;
+  for (const b of state.blocks.filter((ob) => ob.role === "output" && ob.typeId === "text")) {
+    if (!Array.isArray(b._transcriptLog)) continue;
+    const entry = b._transcriptLog.find((e) => e.key === key);
+    if (entry) {
+      entry.label = u.label;
+      entry.body = u.body;
+    } else {
+      b._transcriptLog.push({ key, role: "user", label: u.label, body: u.body });
+    }
     rebuildRunPreviewFromLog(b);
   }
   syncOutputTextChatFromState();
@@ -6308,7 +6498,14 @@ function handleRealtimeDataChannelMessage(raw) {
     const m = String(/** @type {{ message?: string }} */ (err).message || msg.message || "").trim();
     const param = String(/** @type {{ param?: string }} */ (err).param || "").trim();
     const code = String(/** @type {{ code?: string }} */ (err).code || "").trim();
-    console.warn("Realtime error event", { type: msg.type, event_id: msg.event_id, code, param, message: m, error: err });
+    console.warn("Realtime error event", {
+      type: msg.type,
+      event_id: msg.event_id,
+      code,
+      param,
+      message: m,
+      error: err,
+    });
     const hint =
       param.includes("image_url") || m.includes("image_url")
         ? " (image may exceed the Realtime data-channel size limit at full resolution)"
