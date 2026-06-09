@@ -1703,6 +1703,32 @@ function videoLiveFrameIntervalMs(block) {
   return VIDEO_LIVE_FRAME_INTERVAL_MS[key] ?? VIDEO_LIVE_FRAME_INTERVAL_MS["1"];
 }
 
+/** Set by `workshop_video_live_watch` tool; cleared on run stop. */
+let videoLiveWatchMode = false;
+/** @type {string} */
+let videoLiveWatchReason = "";
+
+/**
+ * @param {RTCDataChannel} dc
+ */
+function sendRealtimeVideoLiveFrameResponsePrompt(dc) {
+  if (!videoLiveWatchMode || !dc || dc.readyState !== "open") return;
+  const reasonBit = videoLiveWatchReason ? ` Grund: ${videoLiveWatchReason}.` : "";
+  const instructions =
+    `Neuer Video-Frame.${reasonBit} Du beobachtest den Live-Stream. ` +
+    "Melde dem Teilnehmer nur bei für ihn relevanten sichtbaren Änderungen; sonst vollständig still bleiben.";
+  try {
+    dc.send(
+      JSON.stringify({
+        type: "response.create",
+        response: { instructions },
+      }),
+    );
+  } catch (err) {
+    console.warn("Realtime video-live response.create failed", err);
+  }
+}
+
 /**
  * @param {RTCDataChannel} dc
  * @param {{ id: string, values?: Record<string, string> }} block
@@ -1806,6 +1832,7 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
       kb: (encoded.blob.size / 1024).toFixed(1),
       dataUrlLen: encoded.dataUrl.length,
     });
+    sendRealtimeVideoLiveFrameResponsePrompt(dc);
   } catch (err) {
     console.warn("Realtime video-live frame send failed", err);
     sendRealtimeUserTextItem(
@@ -2021,6 +2048,8 @@ async function stopRealtimeRun() {
     }
   }
   resetVideoLiveCaptureInitPromise();
+  videoLiveWatchMode = false;
+  videoLiveWatchReason = "";
   realtimeRunAutoStop = false;
   realtimeDataChannel = null;
   if (realtimeLocalStream) {
@@ -6076,6 +6105,30 @@ async function handleRealtimeResponseDone(msg) {
             }
             refreshAudioOutputBlocks();
           }
+        } else if (name === "workshop_video_live_watch") {
+          let args = {};
+          try {
+            args = JSON.parse(String(/** @type {{ arguments?: string }} */ (fc).arguments || "{}"));
+          } catch {
+            args = {};
+          }
+          const enabled = args.enabled === true;
+          const reason = String(args.reason ?? "").trim();
+          videoLiveWatchMode = enabled;
+          videoLiveWatchReason = enabled ? reason : "";
+          const body = enabled
+            ? `Watch mode on${reason ? ` — ${reason}` : ""}. Changed frames may trigger proactive responses.`
+            : "Watch mode off. Frames continue as silent context only.";
+          appendSystemTranscriptToTextOutputs(
+            "Tool · workshop_video_live_watch",
+            body,
+            `tool:${callId}:watch`,
+          );
+          outStr = JSON.stringify({
+            ok: true,
+            watching: enabled,
+            reason: enabled && reason ? reason : undefined,
+          });
         } else if (name === "workshop_emit_form_values") {
           let args = {};
           try {

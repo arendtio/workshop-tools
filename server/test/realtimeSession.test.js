@@ -114,6 +114,21 @@ describe("buildRealtimePostConnectSession", () => {
     expect(session.output_modalities).toEqual(["text"]);
   });
 
+  it("registers workshop_video_live_watch when input:video-live is present", () => {
+    const session = buildRealtimePostConnectSession({
+      blocks: [
+        {
+          role: "input",
+          typeId: "video-live",
+          values: { videoSource: "display", frameRate: "1" },
+        },
+        { role: "input", typeId: "audio-live", values: { turnTaking: "vad" } },
+        { role: "output", typeId: "text", values: {} },
+      ],
+    });
+    expect(session.tools?.map((t) => t.name)).toContain("workshop_video_live_watch");
+  });
+
   it("registers workshop_generate_image when output:image is present", () => {
     const session = buildRealtimePostConnectSession({
       blocks: [

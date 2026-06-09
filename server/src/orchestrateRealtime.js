@@ -235,7 +235,8 @@ function buildVideoLiveInputInstructions(plan) {
   const lines = [
     "## Workshop: live video input (camera or screen)",
     "",
-    "The browser sends **changed JPEG frames only** to Realtime as **`input_image` data URIs** (full capture resolution). Unchanged frames are skipped (hash dedup).",
+    "The browser sends **changed JPEG frames only** to Realtime as **`input_image` data URIs** (compressed for WebRTC). Unchanged frames are skipped (hash dedup).",
+    "By default frames are **silent context** — no automatic model turn. To monitor proactively, call **`workshop_video_live_watch`** with `{ enabled: true, reason?: string }`; then each new frame may trigger a turn where you speak about **relevant** visual changes. Call `{ enabled: false }` to stop.",
     "Do not assume you can see the scene until frames arrive; describe only what is visible in the latest frames when asked.",
     "",
     "Configured capture:",

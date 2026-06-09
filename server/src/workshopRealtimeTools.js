@@ -41,6 +41,40 @@ export function planUsesDynamicUiModule(plan) {
   return plan.blocks.some((b) => b.typeId === "dynamic-ui");
 }
 
+/**
+ * @param {{ blocks: { role: string, typeId: string }[] }} plan
+ */
+export function planHasVideoLiveInput(plan) {
+  return plan.blocks.some((b) => b.role === "input" && b.typeId === "video-live");
+}
+
+export function buildWorkshopVideoLiveWatchTool() {
+  return {
+    type: "function",
+    name: "workshop_video_live_watch",
+    description:
+      "Enable or disable proactive monitoring of the workshop **input:video-live** stream (camera or screen). " +
+      "While enabled, each **changed** frame (hash dedup) triggers a model turn where you may speak about relevant visual changes. " +
+      "Call with `{ enabled: true, reason?: string }` when the participant asks you to watch the stream or you need ongoing vision updates. " +
+      "Call `{ enabled: false }` when monitoring should stop. Frames are still sent silently when disabled.",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: {
+          type: "boolean",
+          description: "true = start/continue watch mode; false = stop proactive frame responses.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Optional short note what to watch for (e.g. error dialogs, new chat messages). Stored for subsequent frame turns.",
+        },
+      },
+      required: ["enabled"],
+    },
+  };
+}
+
 export function buildWorkshopEmitFormValuesTool() {
   return {
     type: "function",
@@ -272,6 +306,9 @@ export function buildWorkshopRealtimeTools(plan) {
         tools.push(buildWorkshopKnowledgeSearchTool(pool, summary.vector_store_id));
       }
     }
+  }
+  if (planHasVideoLiveInput(plan)) {
+    tools.push(buildWorkshopVideoLiveWatchTool());
   }
   return tools;
 }

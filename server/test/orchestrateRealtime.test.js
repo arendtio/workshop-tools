@@ -151,6 +151,7 @@ describe("orchestrateRealtime", () => {
     });
     expect(text).toContain("live video input");
     expect(text).toContain("data URIs");
+    expect(text).toContain("workshop_video_live_watch");
     expect(text).toContain("screen/display");
     expect(text).toContain("0.5 fps");
   });
