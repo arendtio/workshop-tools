@@ -710,6 +710,16 @@ let pendingDynamicUiWidgetPatch = null;
  */
 let realtimeRunAutoStop = false;
 
+/** Negotiated SCTP user-message limit after WebRTC connect; cleared on run stop. */
+/** @type {number | null} */
+let realtimeSctpMaxMessageBytes = null;
+
+const REALTIME_SCTP_DEFAULT_MAX_MESSAGE_BYTES = 65536;
+/** Fraction of maxMessageSize reserved for one `conversation.item.create` image event. */
+const REALTIME_IMAGE_EVENT_BUDGET_RATIO = 0.85;
+/** JSON envelope bytes excluding the variable `image_url` / `input_text` payloads. */
+const REALTIME_IMAGE_EVENT_OVERHEAD_BYTES = 1200;
+
 /** Image tool `/api/images/generate` — linear progress bar target (UI estimate only). */
 const IMAGE_GEN_PROGRESS_TARGET_MS = 70_000;
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -818,14 +828,107 @@ const REALTIME_INPUT_AUDIO_MAX_BASE64_CHARS = 12_000_000;
 /** Max knowledge file size (multipart upload; matches server). */
 const KNOWLEDGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 
-/** Guard for `input_image` data URLs on the Realtime data channel (character count incl. prefix). */
-const REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS = 2_000_000;
+function getRealtimeSctpMaxMessageBytes() {
+  const live = realtimePeerConnection?.sctp?.maxMessageSize;
+  if (typeof live === "number" && live > 0) return live;
+  if (typeof realtimeSctpMaxMessageBytes === "number" && realtimeSctpMaxMessageBytes > 0) {
+    return realtimeSctpMaxMessageBytes;
+  }
+  return REALTIME_SCTP_DEFAULT_MAX_MESSAGE_BYTES;
+}
+
+function captureRealtimeSctpMaxMessageSize() {
+  const max = realtimePeerConnection?.sctp?.maxMessageSize;
+  if (typeof max === "number" && max > 0) {
+    realtimeSctpMaxMessageBytes = max;
+    const budget = getRealtimeInputImageEventBudgetBytes();
+    console.info("[workshop] Realtime SCTP limits", { maxMessageSize: max, imageEventBudgetBytes: budget });
+    appendSystemTranscriptToTextOutputs(
+      "Realtime · transport",
+      `WebRTC maxMessageSize ${max} B — shared input_image event budget ${budget} B (file upload + video-live).`,
+      `realtime-sctp:${max}`,
+    );
+  }
+}
+
+function getRealtimeInputImageEventBudgetBytes() {
+  const max = getRealtimeSctpMaxMessageBytes();
+  return Math.max(4096, Math.floor(max * REALTIME_IMAGE_EVENT_BUDGET_RATIO) - REALTIME_IMAGE_EVENT_OVERHEAD_BYTES);
+}
 
 /**
- * Tighter cap for live video frames. Large WebRTC data-channel payloads are often dropped
- * silently (see openai/openai-agents-js#501); static file inputs keep the higher limit.
+ * @param {string} inputText
+ * @param {string} dataUrl
  */
-const REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS = 480_000;
+function realtimeInputImageConversationEventBytes(inputText, dataUrl) {
+  const payload = {
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: inputText },
+        { type: "input_image", image_url: dataUrl, detail: "high" },
+      ],
+    },
+  };
+  return new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+}
+
+/**
+ * @param {string} inputText
+ * @param {string} dataUrl
+ */
+function buildRealtimeInputImageConversationEvent(inputText, dataUrl) {
+  return {
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: inputText },
+        { type: "input_image", image_url: dataUrl, detail: "high" },
+      ],
+    },
+  };
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {number} maxBytes
+ */
+async function waitForRealtimeDataChannelDrain(dc, maxBytes) {
+  const low = Math.max(8192, Math.floor(maxBytes / 4));
+  dc.bufferedAmountLowThreshold = low;
+  if (dc.bufferedAmount <= low) return;
+  await new Promise((resolve) => {
+    const timeoutId = window.setTimeout(resolve, 8000);
+    dc.addEventListener(
+      "bufferedamountlow",
+      () => {
+        clearTimeout(timeoutId);
+        resolve(undefined);
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * @param {RTCDataChannel} dc
+ * @param {object} payload
+ */
+async function sendRealtimeDataChannelJson(dc, payload) {
+  const max = getRealtimeSctpMaxMessageBytes();
+  const json = JSON.stringify(payload);
+  const bytes = new TextEncoder().encode(json).byteLength;
+  if (bytes > max) {
+    throw new Error(`Realtime event too large: ${bytes} B > maxMessageSize ${max} B`);
+  }
+  await waitForRealtimeDataChannelDrain(dc, max);
+  dc.send(json);
+  return bytes;
+}
 
 const VIDEO_LIVE_SOURCE_READY_TIMEOUT_MS = 8000;
 
@@ -1177,29 +1280,29 @@ async function waitForVideoLiveSourceReady(video, timeoutMs = VIDEO_LIVE_SOURCE_
 }
 
 /**
- * Scale + recompress JPEG until a data URL fits (live video; WebRTC-safe sizes).
+ * Scale + recompress JPEG until the full Realtime JSON event fits the negotiated SCTP budget.
+ * Shared by static `input:image` uploads and `video-live` frames.
  * @param {Blob} blob
- * @param {number} maxChars
- * @returns {Promise<{ blob: Blob, dataUrl: string, width: number, height: number } | null>}
+ * @param {string} inputText
+ * @returns {Promise<{ blob: Blob, dataUrl: string, width: number, height: number, eventBytes: number } | null>}
  */
-async function scaleAndCompressJpegForRealtimeDataUrl(blob, maxChars) {
+async function encodeBlobForRealtimeInputImage(blob, inputText) {
   if (!(blob instanceof Blob) || blob.size < 1) return null;
+  const budgetBytes = getRealtimeInputImageEventBudgetBytes();
+  const maxBytes = getRealtimeSctpMaxMessageBytes();
   let bmp;
   try {
     bmp = await createImageBitmap(blob);
   } catch (err) {
-    console.warn("scaleAndCompressJpegForRealtimeDataUrl: createImageBitmap failed", err);
-    const fallbackBlob = await reencodeJpegBlobUnderDataUrlCharLimit(blob, maxChars);
-    const dataUrl = await readBlobAsDataUrl(fallbackBlob);
-    if (!dataUrl.startsWith("data:image/") || dataUrl.length > maxChars) return null;
-    return { blob: fallbackBlob, dataUrl, width: 0, height: 0 };
+    console.warn("encodeBlobForRealtimeInputImage: createImageBitmap failed", err);
+    return null;
   }
   try {
-    const scales = [1, 0.75, 0.5, 0.38, 0.28];
-    const qualities = [0.85, 0.72, 0.58, 0.45, 0.32];
-    /** @type {{ blob: Blob, dataUrl: string, width: number, height: number } | null} */
+    const scales = [1, 0.75, 0.5, 0.38, 0.28, 0.2];
+    const qualities = [0.85, 0.72, 0.58, 0.45, 0.32, 0.24];
+    /** @type {{ blob: Blob, dataUrl: string, width: number, height: number, eventBytes: number } | null} */
     let smallest = null;
-    let smallestLen = Infinity;
+    let smallestEventBytes = Infinity;
     for (const scale of scales) {
       const w = Math.max(1, Math.round(bmp.width * scale));
       const h = Math.max(1, Math.round(bmp.height * scale));
@@ -1214,68 +1317,22 @@ async function scaleAndCompressJpegForRealtimeDataUrl(blob, maxChars) {
           canvas.toBlob((b) => res(b instanceof Blob ? b : null), "image/jpeg", q);
         });
         if (!(jpegBlob instanceof Blob) || jpegBlob.size < 1) continue;
-        const du = await readBlobAsDataUrl(jpegBlob);
-        if (du.length <= maxChars) {
-          return { blob: jpegBlob, dataUrl: du, width: w, height: h };
+        const dataUrl = await readBlobAsDataUrl(jpegBlob);
+        if (!dataUrl.startsWith("data:image/")) continue;
+        const eventBytes = realtimeInputImageConversationEventBytes(inputText, dataUrl);
+        if (eventBytes <= budgetBytes && eventBytes <= maxBytes) {
+          return { blob: jpegBlob, dataUrl, width: w, height: h, eventBytes };
         }
-        if (du.length < smallestLen) {
-          smallestLen = du.length;
-          smallest = { blob: jpegBlob, dataUrl: du, width: w, height: h };
+        if (eventBytes < smallestEventBytes) {
+          smallestEventBytes = eventBytes;
+          smallest = { blob: jpegBlob, dataUrl, width: w, height: h, eventBytes };
         }
       }
     }
-    return smallest;
-  } finally {
-    bmp.close();
-  }
-}
-
-/**
- * @param {Blob} blob
- * @returns {Promise<{ blob: Blob, dataUrl: string, width: number, height: number } | null>}
- */
-async function encodeVideoLiveFrameForRealtimeDataUrl(blob) {
-  const encoded = await scaleAndCompressJpegForRealtimeDataUrl(blob, REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS);
-  if (!encoded) return null;
-  if (encoded.dataUrl.length > REALTIME_VIDEO_LIVE_MAX_DATA_URL_CHARS) return null;
-  return encoded;
-}
-
-async function reencodeJpegBlobUnderDataUrlCharLimit(blob, maxChars) {
-  if (!(blob instanceof Blob) || blob.size < 1) return blob;
-  const initial = await readBlobAsDataUrl(blob);
-  if (initial.length <= maxChars) return blob;
-  let bmp;
-  try {
-    bmp = await createImageBitmap(blob);
-  } catch (err) {
-    console.warn("reencodeJpegBlobUnderDataUrlCharLimit: createImageBitmap failed", err);
-    return blob;
-  }
-  try {
-    const qualities = [0.88, 0.78, 0.68, 0.58, 0.48, 0.38, 0.28];
-    /** @type {Blob | null} */
-    let smallest = null;
-    let smallestLen = initial.length;
-    for (const q of qualities) {
-      const canvas = document.createElement("canvas");
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) break;
-      ctx.drawImage(bmp, 0, 0);
-      const jpegBlob = await new Promise((res) => {
-        canvas.toBlob((b) => res(b instanceof Blob ? b : null), "image/jpeg", q);
-      });
-      if (!(jpegBlob instanceof Blob) || jpegBlob.size < 1) continue;
-      const du = await readBlobAsDataUrl(jpegBlob);
-      if (du.length <= maxChars) return jpegBlob;
-      if (du.length < smallestLen) {
-        smallestLen = du.length;
-        smallest = jpegBlob;
-      }
+    if (smallest && smallest.eventBytes <= budgetBytes && smallest.eventBytes <= maxBytes) {
+      return smallest;
     }
-    return smallest instanceof Blob ? smallest : blob;
+    return null;
   } finally {
     bmp.close();
   }
@@ -1292,23 +1349,6 @@ function readBlobAsDataUrl(blob) {
     r.onerror = () => reject(r.error || new Error("read failed"));
     r.readAsDataURL(blob);
   });
-}
-
-/**
- * @param {Blob} blob
- * @returns {Promise<{ blob: Blob, dataUrl: string } | null>}
- */
-async function encodeImageBlobForRealtimeDataUrl(blob) {
-  if (!(blob instanceof Blob) || blob.size < 1) return null;
-  const inlineBlob = await reencodeJpegBlobUnderDataUrlCharLimit(
-    blob,
-    REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS,
-  );
-  const dataUrl = await readBlobAsDataUrl(inlineBlob);
-  if (!dataUrl.startsWith("data:image/") || dataUrl.length > REALTIME_INPUT_IMAGE_MAX_DATA_URL_CHARS) {
-    return null;
-  }
-  return { blob: inlineBlob, dataUrl };
 }
 
 /**
@@ -1355,7 +1395,7 @@ async function sendRealtimeInputImageBlock(dc, block) {
 
   let encoded;
   try {
-    encoded = await encodeImageBlobForRealtimeDataUrl(blob);
+    encoded = await encodeBlobForRealtimeInputImage(blob, inputText);
   } catch (err) {
     console.warn("Image read failed", err);
     showToast("Could not read image file.");
@@ -1364,28 +1404,25 @@ async function sendRealtimeInputImageBlock(dc, block) {
   }
 
   if (!encoded) {
-    showToast("Image too large for the Realtime data channel after compression.");
+    const max = getRealtimeSctpMaxMessageBytes();
+    const budget = getRealtimeInputImageEventBudgetBytes();
+    showToast(`Image too large for WebRTC data channel (maxMessageSize ${max} B, budget ${budget} B).`);
     sendRealtimeUserTextItem(
       dc,
-      `${label}\n(Image still too large for the Realtime data channel at full resolution.)`,
+      `${label}\n(Image still too large for the Realtime data channel after compression — maxMessageSize ${max} B.)`,
     );
     return;
   }
 
   try {
-    dc.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [
-            { type: "input_text", text: inputText },
-            { type: "input_image", image_url: encoded.dataUrl, detail: "high" },
-          ],
-        },
-      }),
-    );
+    const event = buildRealtimeInputImageConversationEvent(inputText, encoded.dataUrl);
+    const eventBytes = await sendRealtimeDataChannelJson(dc, event);
+    console.debug("[workshop] input_image sent", {
+      eventBytes,
+      maxMessageSize: getRealtimeSctpMaxMessageBytes(),
+      sentWidth: encoded.width,
+      sentHeight: encoded.height,
+    });
   } catch (err) {
     console.warn("Realtime input_image send failed", err);
     showToast("Could not send image to Realtime (message too large or channel closed).");
@@ -1766,19 +1803,26 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
     return;
   }
 
+  const src =
+    String(block.values?.videoSource ?? "camera").trim() === "display" ? "screen" : "camera";
+  const seq = options.seq ? ` #${options.seq}` : "";
+  const budgetInputText = `${label}${seq} (${src}, live frame, ${captured.width}×${captured.height} (from ${captured.width}×${captured.height}))`;
+
   let encoded;
   try {
-    encoded = await encodeVideoLiveFrameForRealtimeDataUrl(captured.blob);
+    encoded = await encodeBlobForRealtimeInputImage(captured.blob, budgetInputText);
   } catch (err) {
     console.warn("Video frame encode failed", err);
     sendRealtimeUserTextItem(dc, `${label}\n(Video frame encode failed in the browser.)`);
     return;
   }
   if (!encoded) {
-    sendRealtimeUserTextItem(
-      dc,
-      `${label}\n(Frame still too large for the Realtime data channel after compression.)`,
-    );
+    console.warn("[workshop] video-live frame over SCTP budget", {
+      maxMessageSize: getRealtimeSctpMaxMessageBytes(),
+      budgetBytes: getRealtimeInputImageEventBudgetBytes(),
+      captureWidth: captured.width,
+      captureHeight: captured.height,
+    });
     return;
   }
 
@@ -1791,46 +1835,31 @@ async function sendRealtimeVideoLiveFrame(dc, block, options = {}) {
   const previewH = encoded.height > 0 ? encoded.height : captured.height;
   applyVideoLivePreviewDisplay(block.id, previewUrl, previewW, previewH);
 
-  const src =
-    String(block.values?.videoSource ?? "camera").trim() === "display" ? "screen" : "camera";
-  const seq = options.seq ? ` #${options.seq}` : "";
   const sentRes =
     encoded.width > 0 && encoded.height > 0 && (encoded.width !== captured.width || encoded.height !== captured.height)
       ? `${encoded.width}×${encoded.height} (from ${captured.width}×${captured.height})`
       : `${captured.width}×${captured.height}`;
   const inputText = `${label}${seq} (${src}, live frame, ${sentRes})`;
 
-  /** @type {{ type: string, text?: string, image_url?: string, detail?: string }[]} */
-  const content = [
-    { type: "input_text", text: inputText },
-    { type: "input_image", image_url: encoded.dataUrl, detail: "high" },
-  ];
-
   try {
+    const event = buildRealtimeInputImageConversationEvent(inputText, encoded.dataUrl);
+    const eventBytes = await sendRealtimeDataChannelJson(dc, event);
     console.debug("[workshop] video-live frame send", {
       captureWidth: captured.width,
       captureHeight: captured.height,
       sentWidth: encoded.width,
       sentHeight: encoded.height,
-      dataUrlLen: encoded.dataUrl.length,
+      eventBytes,
+      maxMessageSize: getRealtimeSctpMaxMessageBytes(),
       blobKb: (encoded.blob.size / 1024).toFixed(1),
     });
-    dc.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content,
-        },
-      }),
-    );
     appendVideoLiveFrameSentTranscript(block, {
       seq: options.seq,
       src,
       sentRes,
       kb: (encoded.blob.size / 1024).toFixed(1),
-      dataUrlLen: encoded.dataUrl.length,
+      eventBytes,
+      maxMessageSize: getRealtimeSctpMaxMessageBytes(),
     });
     sendRealtimeVideoLiveFrameResponsePrompt(dc);
   } catch (err) {
@@ -2052,6 +2081,7 @@ async function stopRealtimeRun() {
   videoLiveWatchReason = "";
   realtimeRunAutoStop = false;
   realtimeDataChannel = null;
+  realtimeSctpMaxMessageBytes = null;
   if (realtimeLocalStream) {
     realtimeLocalStream.getTracks().forEach((t) => t.stop());
     realtimeLocalStream = null;
@@ -2300,6 +2330,7 @@ async function startRealtimeRun() {
 
     const answer = { type: "answer", sdp: await sdpRes.text() };
     await pc.setRemoteDescription(answer);
+    captureRealtimeSctpMaxMessageSize();
 
     showToast(
       pipelineKeepsRealtimeSessionOpen()
@@ -4061,7 +4092,7 @@ function gatherConversationSnapshotForTextOutput() {
         } else {
           const ready = blob instanceof Blob && blob.size > 0;
           body = ready
-            ? `${stub || "image"} — ${blob.size} bytes, volle Auflösung für Realtime`
+            ? `${stub || "image"} — ${blob.size} bytes, komprimiert für WebRTC (maxMessageSize-budget)`
             : stub
               ? `${stub} — pick the file again before Run if vision is missing`
               : "(no file selected)";
@@ -4193,11 +4224,11 @@ function appendSystemTranscriptToTextOutputs(label, body, dedupeKey) {
 
 /**
  * @param {{ id: string }} block
- * @param {{ seq?: number, src: string, sentRes: string, kb: string, dataUrlLen: number }} meta
+ * @param {{ seq?: number, src: string, sentRes: string, kb: string, eventBytes: number, maxMessageSize: number }} meta
  */
 function appendVideoLiveFrameSentTranscript(block, meta) {
   const seqBit = meta.seq != null ? ` #${meta.seq}` : "";
-  const body = `Frame${seqBit} — ${meta.src}, ${meta.sentRes}, ${meta.kb} KB, ${meta.dataUrlLen} chars data URL`;
+  const body = `Frame${seqBit} — ${meta.src}, ${meta.sentRes}, ${meta.kb} KB, ${meta.eventBytes} B event / ${meta.maxMessageSize} B maxMessageSize`;
   appendSystemTranscriptToTextOutputs(
     "Video · frame sent",
     body,
